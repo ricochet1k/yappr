@@ -2,6 +2,7 @@ import { getWasmSdk } from './wasm-sdk-service';
 import { get_documents, get_document } from '../dash-wasm/wasm_sdk';
 import { stateTransitionService } from './state-transition-service';
 import { YAPPR_CONTRACT_ID } from '../constants';
+import { cacheManager } from '../cache-manager';
 
 export interface QueryOptions {
   where?: Array<[string, string, any]>;
@@ -20,7 +21,6 @@ export interface DocumentResult<T> {
 export abstract class BaseDocumentService<T> {
   protected readonly contractId: string;
   protected readonly documentType: string;
-  protected cache: Map<string, { data: T; timestamp: number }> = new Map();
   protected readonly CACHE_TTL = 30000; // 30 seconds cache
 
   constructor(documentType: string) {
@@ -61,16 +61,35 @@ export abstract class BaseDocumentService<T> {
 
       console.log(`Querying ${this.documentType} documents:`, query);
       
-      const response = await get_documents(
-        sdk,
-        this.contractId,
-        this.documentType,
-        query.where || null,
-        query.orderBy || null,
-        query.limit || 25,
-        query.startAfter || null,
-        query.startAt || null
-      );
+      const cacheKey = JSON.stringify({
+        where: query.where || null,
+        orderBy: query.orderBy || null,
+        limit: query.limit || 25,
+        startAfter: query.startAfter || null,
+        startAt: query.startAt || null
+      })
+
+      const cacheName = `documents:${this.documentType}`
+
+      const response = await cacheManager.getOrFetch<any>(
+        cacheName,
+        cacheKey,
+        async () => {
+          return await get_documents(
+            sdk,
+            this.contractId,
+            this.documentType,
+            query.where || null,
+            query.orderBy || null,
+            query.limit || 25,
+            query.startAfter || null,
+            query.startAt || null
+          )
+        },
+        { ttl: this.CACHE_TTL, tags: [
+          `doctype:${this.documentType}`
+        ] }
+      )
 
       // get_documents returns an object directly, not JSON string
       let result = response;
@@ -121,36 +140,25 @@ export abstract class BaseDocumentService<T> {
    */
   async get(documentId: string): Promise<T | null> {
     try {
-      // Check cache
-      const cached = this.cache.get(documentId);
-      if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
-        return cached.data;
-      }
-
-      const sdk = await getWasmSdk();
-      
-      const response = await get_document(
-        sdk,
-        this.contractId,
-        this.documentType,
-        documentId
-      );
-
-      if (!response) {
-        return null;
-      }
-
-      // get_document returns an object directly
-      const doc = response;
-      const transformed = this.transformDocument(doc);
-      
-      // Cache the result
-      this.cache.set(documentId, {
-        data: transformed,
-        timestamp: Date.now()
-      });
-
-      return transformed;
+      const cacheName = `document:${this.documentType}`
+      return await cacheManager.getOrFetch<T | null>(
+        cacheName,
+        documentId,
+        async () => {
+          const sdk = await getWasmSdk();
+          const response = await get_document(
+            sdk,
+            this.contractId,
+            this.documentType,
+            documentId
+          );
+          if (!response) return null as any
+          const doc = response
+          const transformed = this.transformDocument(doc)
+          return transformed
+        },
+        { ttl: this.CACHE_TTL, tags: [`doctype:${this.documentType}`, `docid:${this.documentType}:${documentId}`] }
+      )
     } catch (error) {
       console.error(`Error getting ${this.documentType} document:`, error);
       return null;
@@ -178,8 +186,8 @@ export abstract class BaseDocumentService<T> {
         throw new Error(result.error || 'Failed to create document');
       }
       
-      // Clear relevant caches
-      this.clearCache();
+      // Invalidate caches for this document type
+      cacheManager.invalidateByTag(`doctype:${this.documentType}`)
       
       return this.transformDocument(result.document);
     } catch (error) {
@@ -218,8 +226,9 @@ export abstract class BaseDocumentService<T> {
         throw new Error(result.error || 'Failed to update document');
       }
       
-      // Clear cache for this document
-      this.cache.delete(documentId);
+      // Invalidate caches for this document and type
+      cacheManager.invalidateByTag(`doctype:${this.documentType}`)
+      cacheManager.invalidateByTag(`docid:${this.documentType}:${documentId}`)
       
       return this.transformDocument(result.document);
     } catch (error) {
@@ -249,8 +258,9 @@ export abstract class BaseDocumentService<T> {
         throw new Error(result.error || 'Failed to delete document');
       }
       
-      // Clear cache
-      this.cache.delete(documentId);
+      // Invalidate caches
+      cacheManager.invalidateByTag(`doctype:${this.documentType}`)
+      cacheManager.invalidateByTag(`docid:${this.documentType}:${documentId}`)
       
       return true;
     } catch (error) {
@@ -270,9 +280,9 @@ export abstract class BaseDocumentService<T> {
    */
   clearCache(documentId?: string): void {
     if (documentId) {
-      this.cache.delete(documentId);
+      cacheManager.invalidateByTag(`docid:${this.documentType}:${documentId}`)
     } else {
-      this.cache.clear();
+      cacheManager.invalidateByTag(`doctype:${this.documentType}`)
     }
   }
 
@@ -280,11 +290,6 @@ export abstract class BaseDocumentService<T> {
    * Clean up expired cache entries
    */
   cleanupCache(): void {
-    const now = Date.now();
-    for (const [key, value] of Array.from(this.cache.entries())) {
-      if (now - value.timestamp > this.CACHE_TTL) {
-        this.cache.delete(key);
-      }
-    }
+    // No-op: centralized cleanup handled by cacheManager
   }
 }

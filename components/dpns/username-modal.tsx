@@ -116,12 +116,6 @@ export function UsernameModal({ isOpen, onClose, customIdentityId: initialIdenti
     setIsSubmitting(true)
     
     try {
-      // Get the private key from session storage
-      const privateKey = sessionStorage.getItem('yappr_pk')
-      if (!privateKey) {
-        throw new Error('Authentication required. Please log in again.')
-      }
-      
       // Get the identity to find a suitable key
       const { identityService } = await import('@/lib/services/identity-service')
       const identity = await identityService.getIdentity(currentIdentityId)
@@ -160,8 +154,8 @@ export function UsernameModal({ isOpen, onClose, customIdentityId: initialIdenti
       const keySecurityLevel = suitableKey.security_level ?? suitableKey.securityLevel
       console.log(`Using key ${suitableKey.id} with security level ${keySecurityLevel === 1 ? 'CRITICAL' : 'HIGH'} (${keySecurityLevel})`)
       
-      // Register the username
-      await dpnsService.registerUsername(username, currentIdentityId, suitableKey.id, privateKey)
+      // Register the username (private key resolved internally)
+      await dpnsService.registerUsername(username, currentIdentityId, suitableKey.id)
       
       toast.success('DPNS username registered successfully!')
       

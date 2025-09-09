@@ -52,73 +52,51 @@ function FeedPage() {
         ? `feed_your_posts_${user.identityId}`
         : `feed_${activeTab}`
       
-      // Check cache first unless force refresh
-      if (!forceRefresh) {
-        const cached = cacheManager.get<any[]>('feed', cacheKey)
-        if (cached) {
-          console.log('Feed: Using cached data')
-          setData(cached)
-          setLoading(false)
-          return
-        }
-      }
-      
-      // Query posts from the platform
-      const queryOptions: any = {
-        limit: 20,
-        forceRefresh: false
-      }
-      
-      // Only filter by user for "Your Posts" tab
-      if (activeTab === 'your-posts' && user?.identityId) {
-        queryOptions.authorId = user.identityId
-        console.log('Feed: Filtering posts by user:', user.identityId)
-      }
-      // For "For You" and "Trending", get all posts
-      else {
-        console.log('Feed: Loading all posts for:', activeTab)
-      }
-      
-      const posts = await dashClient.queryPosts(queryOptions)
-      
-      console.log('Feed: Raw posts from platform:', posts)
-      
-      // Transform posts to match our UI format
-      const transformedPosts = await Promise.all(posts.map(async (doc: any) => {
-        // Extract the document data
-        const data = doc.data || doc
-        
-        // Get the author ID from ownerId (SDK returns without $ prefix)
-        const authorIdStr = doc.ownerId || 'unknown'
-        
-        return {
-          id: doc.id || Math.random().toString(36).substr(2, 9),
-          content: data.content || 'No content',
-          author: {
-            id: authorIdStr,
-            username: `user_${authorIdStr.slice(-6)}`,
-            handle: `user_${authorIdStr.slice(-6)}`,
-            displayName: `User ${authorIdStr.slice(-6)}`,
-            verified: false
-          },
-          createdAt: doc.createdAt ? new Date(doc.createdAt).toISOString() : new Date().toISOString(),
-          likes: Math.floor(Math.random() * 50), // Placeholder until we implement likes
-          replies: Math.floor(Math.random() * 20), // Placeholder until we implement replies
-          reposts: Math.floor(Math.random() * 10), // Placeholder until we implement reposts
-          liked: false,
-          reposted: false,
-          bookmarked: false
-        }
-      }))
-      
-      console.log('Feed: Transformed posts:', transformedPosts)
-      
-      // Sort posts by createdAt to ensure newest first
-      const sortedPosts = transformedPosts.sort((a, b) => {
-        const dateA = new Date(a.createdAt).getTime()
-        const dateB = new Date(b.createdAt).getTime()
-        return dateB - dateA // Newest first
-      })
+      // Use centralized cache to dedupe and persist the feed
+      const sortedPosts = await cacheManager.getOrFetch<any[]>(
+        'feed',
+        cacheKey,
+        async () => {
+          // Query posts from the platform
+          const queryOptions: any = {
+            limit: 20,
+            forceRefresh: false
+          }
+          if (activeTab === 'your-posts' && user?.identityId) {
+            queryOptions.authorId = user.identityId
+            console.log('Feed: Filtering posts by user:', user.identityId)
+          } else {
+            console.log('Feed: Loading all posts for:', activeTab)
+          }
+          const posts = await dashClient.queryPosts(queryOptions)
+          // Transform posts to match our UI format
+          const transformed = await Promise.all(posts.map(async (doc: any) => {
+            const data = doc.data || doc
+            const authorIdStr = doc.ownerId || 'unknown'
+            return {
+              id: doc.id || Math.random().toString(36).substr(2, 9),
+              content: data.content || 'No content',
+              author: {
+                id: authorIdStr,
+                username: `user_${authorIdStr.slice(-6)}`,
+                handle: `user_${authorIdStr.slice(-6)}`,
+                displayName: `User ${authorIdStr.slice(-6)}`,
+                verified: false
+              },
+              createdAt: doc.createdAt ? new Date(doc.createdAt).toISOString() : new Date().toISOString(),
+              likes: Math.floor(Math.random() * 50),
+              replies: Math.floor(Math.random() * 20),
+              reposts: Math.floor(Math.random() * 10),
+              liked: false,
+              reposted: false,
+              bookmarked: false
+            }
+          }))
+          // Sort by createdAt newest first
+          return transformed.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        },
+        { ttl: 30000, tags: ['feed'] }
+      )
       
       
       // If no posts found, show helpful message but don't error
@@ -126,12 +104,6 @@ function FeedPage() {
         console.log('Feed: No posts found on platform')
         setData([])
       } else {
-        // Cache the results
-        const cacheKey = activeTab === 'your-posts' && user?.identityId 
-          ? `feed_your_posts_${user.identityId}`
-          : `feed_${activeTab}`
-        cacheManager.set('feed', cacheKey, sortedPosts)
-        
         setData(sortedPosts)
         console.log(`Feed: Successfully loaded ${sortedPosts.length} posts (newest first)`)
       }

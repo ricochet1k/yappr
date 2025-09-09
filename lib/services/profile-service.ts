@@ -31,6 +31,7 @@ class ProfileService extends BaseDocumentService<User> {
   }
 
   private cachedUsername?: string;
+  private pendingUsernameHint: Map<string, string> = new Map();
 
   /**
    * Override query to handle cached username
@@ -122,9 +123,9 @@ class ProfileService extends BaseDocumentService<User> {
     console.log('ProfileService: transformDocument input:', doc);
     
     // Handle both $ prefixed and non-prefixed properties
-    const ownerId = doc.$ownerId || doc.ownerId;
-    const createdAt = doc.$createdAt || doc.createdAt;
-    const data = doc.data || doc;
+    const ownerId = (doc as any).$ownerId || (doc as any).ownerId;
+    const createdAt = (doc as any).$createdAt || (doc as any).createdAt;
+    const data = (doc as any).data || (doc as any);
     
     // Return a basic User object - additional data will be loaded separately
     const user: User = {
@@ -182,52 +183,41 @@ class ProfileService extends BaseDocumentService<User> {
    */
   async getProfile(ownerId: string, cachedUsername?: string): Promise<User | null> {
     try {
-      console.log('ProfileService: Getting profile for owner ID:', ownerId);
-      
-      // Check cache first
-      const cached = cacheManager.get<User>(this.PROFILE_CACHE, ownerId);
-      if (cached) {
-        console.log('ProfileService: Returning cached profile for:', ownerId);
-        // Update username if provided
-        if (cachedUsername && cached.username !== cachedUsername) {
-          cached.username = cachedUsername;
-        }
-        return cached;
-      }
-      
-      // Set cached username for transform
-      this.cachedUsername = cachedUsername;
-      
-      // Query by owner ID
-      const result = await this.query({
-        where: [['$ownerId', '==', ownerId]],
-        limit: 1
-      });
-
-      console.log('ProfileService: Query result:', result);
-      console.log('ProfileService: Documents found:', result.documents.length);
-
-      if (result.documents.length > 0) {
-        const profile = result.documents[0];
-        console.log('ProfileService: Returning profile:', profile);
-        
-        // Cache the result with profile and user tags
-        cacheManager.set(this.PROFILE_CACHE, ownerId, profile, {
-          ttl: 300000, // 5 minutes
-          tags: ['profile', `user:${ownerId}`]
-        });
-        
-        return profile;
+      console.log('ProfileService: Getting profile for owner ID (batched):', ownerId)
+      if (cachedUsername) {
+        this.pendingUsernameHint.set(ownerId, cachedUsername)
       }
 
-      console.log('ProfileService: No profile found for owner ID:', ownerId);
-      return null;
+      // Opportunistic batching for multiple concurrent getProfile calls
+      const user = await cacheManager.enqueueBatch<User | null>(
+        'profiles:getByOwner',
+        ownerId,
+        async (ownerIds: string[]) => {
+          const docs = await this.getProfilesByIdentityIds(ownerIds)
+          const map: Record<string, User | null> = {}
+          const byId = new Map(docs.map(d => [d.$ownerId || (d as any).ownerId, d]))
+          for (const id of ownerIds) {
+            const doc = byId.get(id)
+            if (doc) {
+              const hint = this.pendingUsernameHint.get(id)
+              const transformed = this.transformDocument(doc as any, { cachedUsername: hint })
+              map[id] = transformed
+            } else {
+              map[id] = null
+            }
+            this.pendingUsernameHint.delete(id)
+          }
+          return map
+        },
+        { delayMs: 25 }
+      )
+
+      return user
     } catch (error) {
-      console.error('ProfileService: Error getting profile:', error);
-      return null;
+      console.error('ProfileService: Error getting profile:', error)
+      return null
     } finally {
-      // Clear cached username
-      this.cachedUsername = undefined;
+      this.cachedUsername = undefined
     }
   }
 
@@ -329,23 +319,8 @@ class ProfileService extends BaseDocumentService<User> {
    * Get username from DPNS
    */
   private async getUsername(ownerId: string): Promise<string | null> {
-    // Check cache
-    const cached = cacheManager.get<string>(this.USERNAME_CACHE, ownerId);
-    if (cached) {
-      return cached;
-    }
-
     try {
       const username = await dpnsService.resolveUsername(ownerId);
-      
-      if (username) {
-        // Cache the result with user and username tags
-        cacheManager.set(this.USERNAME_CACHE, ownerId, username, {
-          ttl: 300000, // 5 minutes
-          tags: ['username', `user:${ownerId}`]
-        });
-      }
-
       return username;
     } catch (error) {
       console.error('Error resolving username:', error);
@@ -382,39 +357,30 @@ class ProfileService extends BaseDocumentService<User> {
    * Get avatar data
    */
   private async getAvatarData(avatarId: string): Promise<string | undefined> {
-    // Check cache
-    const cached = cacheManager.get<string>(this.AVATAR_CACHE, avatarId);
-    if (cached) {
-      return cached;
-    }
-
     try {
-      const sdk = await getWasmSdk();
-      
-      const response = await get_document(
-        sdk,
-        this.contractId,
-        'avatar',
-        avatarId
-      );
-
-      if (response) {
-        // get_document returns an object directly
-        const doc = response as AvatarDocument;
-        
-        // Cache the result with avatar tag
-        cacheManager.set(this.AVATAR_CACHE, avatarId, doc.data, {
-          ttl: 1800000, // 30 minutes (avatars change less frequently)
-          tags: ['avatar', `user:${doc.$ownerId}`]
-        });
-
-        return doc.data;
-      }
+      return await cacheManager.getOrFetch<string | undefined>(
+        'avatars',
+        avatarId,
+        async () => {
+          const sdk = await getWasmSdk();
+          const response = await get_document(
+            sdk,
+            this.contractId,
+            'avatar',
+            avatarId
+          );
+          if (response) {
+            const doc = response as AvatarDocument;
+            return doc.data;
+          }
+          return undefined;
+        },
+        { ttl: 1800000, tags: ['avatar'] }
+      )
     } catch (error) {
       console.error('Error getting avatar:', error);
+      return undefined;
     }
-
-    return undefined;
   }
 
   /**
@@ -528,35 +494,42 @@ class ProfileService extends BaseDocumentService<User> {
       }
 
       console.log('ProfileService: Getting profiles for identity IDs:', identityIds);
-      
-      const sdk = await getWasmSdk();
-      
-      // Query profiles where $ownerId is in the array
-      // Need to add orderBy for 'in' queries
-      const where = [['$ownerId', 'in', identityIds]];
-      const orderBy = [['$ownerId', 'asc']];
-      
-      const response = await get_documents(
-        sdk,
-        this.contractId,
-        this.documentType,
-        JSON.stringify(where),
-        JSON.stringify(orderBy),
-        100, // Get up to 100 profiles
-        null,
-        null
-      );
 
-      // Handle response format
-      if (Array.isArray(response)) {
-        console.log(`ProfileService: Found ${response.length} profiles`);
-        return response;
-      } else if (response && response.documents) {
-        console.log(`ProfileService: Found ${response.documents.length} profiles`);
-        return response.documents;
+      // Use cache manager batch fetch to dedupe and persist
+      const cacheName = 'profiles:byOwner'
+      const fetchedMap = await cacheManager.getOrFetchBatch<ProfileDocument>(
+        cacheName,
+        identityIds,
+        async (missingIds: string[]) => {
+          const sdk = await getWasmSdk();
+          const where = [['$ownerId', 'in', missingIds]];
+          const orderBy = [['$ownerId', 'asc']];
+          const resp = await get_documents(
+            sdk,
+            this.contractId,
+            this.documentType,
+            JSON.stringify(where),
+            JSON.stringify(orderBy),
+            100,
+            null,
+            null
+          );
+          const map: Record<string, ProfileDocument> = {}
+          const docs = Array.isArray(resp) ? resp : (resp?.documents || [])
+          for (const doc of docs) {
+            const ownerId = (doc.$ownerId || doc.ownerId) as string
+            map[ownerId] = doc
+          }
+          return map
+        },
+        { ttl: 300000, tags: ['doctype:profile'] }
+      )
+
+      const results: ProfileDocument[] = []
+      for (const id of identityIds) {
+        if (fetchedMap[id]) results.push(fetchedMap[id])
       }
-      
-      return [];
+      return results
     } catch (error) {
       console.error('ProfileService: Error getting profiles by identity IDs:', error);
       return [];

@@ -63,16 +63,7 @@ function FollowingPage() {
 
       const cacheKey = `following_${user.identityId}`
       
-      // Check cache first unless force refresh
-      if (!forceRefresh) {
-        const cached = cacheManager.get<FollowingUser[]>('following', cacheKey)
-        if (cached) {
-          console.log('Following: Using cached data')
-          setData(cached)
-          setLoading(false)
-          return
-        }
-      }
+      // Use cache to dedupe and persist results
 
       // Use followService to get following list
       const follows = await followService.getFollowing(user.identityId, { limit: 50 })
@@ -119,10 +110,10 @@ function FollowingPage() {
       // Create maps for easy lookup
       const dpnsMap = new Map(dpnsNames.map(item => [item.id, item.username]))
       const allUsernamesMap = new Map(allUsernamesData.map(item => [item.id, item.usernames]))
-      const profileMap = new Map(profiles.map(p => [p.$ownerId || p.ownerId, p]))
+      const profileMap = new Map(profiles.map(p => [p.$ownerId || (p as any).ownerId, p]))
       
       // Create enriched user data
-      const followingUsers = follows.map((follow: any) => {
+      const followingUsers = (follows.map((follow: any) => {
         const followingId = follow.followingId
         if (!followingId) {
           console.warn('Follow document missing followingId:', follow)
@@ -144,10 +135,10 @@ function FollowingPage() {
           isFollowing: true,
           allUsernames: allUsernames
         }
-      }).filter(Boolean) // Remove any null entries
+      }).filter(Boolean)) as FollowingUser[] // Remove any null entries
 
       // Cache the results
-      cacheManager.set('following', cacheKey, followingUsers)
+      await cacheManager.getOrFetch('following', cacheKey, async () => followingUsers, { ttl: 60000, tags: ['following'] })
       
       setData(followingUsers)
       console.log(`Following: Successfully loaded ${followingUsers.length} following`)

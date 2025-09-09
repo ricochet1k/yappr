@@ -2,6 +2,7 @@ import { BaseDocumentService, QueryOptions, DocumentResult } from './document-se
 import { Post, User } from '../types';
 import { identityService } from './identity-service';
 import { profileService } from './profile-service';
+import { cacheManager } from '../cache-manager';
 
 export interface PostDocument {
   $id: string;
@@ -27,7 +28,6 @@ export interface PostStats {
 }
 
 class PostService extends BaseDocumentService<Post> {
-  private statsCache: Map<string, { data: PostStats; timestamp: number }> = new Map();
 
   constructor() {
     super('post');
@@ -198,29 +198,23 @@ class PostService extends BaseDocumentService<Post> {
    * Get post statistics (likes, reposts, replies)
    */
   private async getPostStats(postId: string): Promise<PostStats> {
-    // Check cache
-    const cached = this.statsCache.get(postId);
-    if (cached && Date.now() - cached.timestamp < 10000) { // 10 second cache for stats
-      return cached.data;
-    }
-
     try {
-      // In a real implementation, these would be parallel queries
-      const stats: PostStats = {
+      return await cacheManager.getOrFetch<PostStats>(
+        'post:stats',
         postId,
-        likes: await this.countLikes(postId),
-        reposts: await this.countReposts(postId),
-        replies: await this.countReplies(postId),
-        views: 0 // Views would need a separate tracking mechanism
-      };
-
-      // Cache the result
-      this.statsCache.set(postId, {
-        data: stats,
-        timestamp: Date.now()
-      });
-
-      return stats;
+        async () => {
+          // In a real implementation, these would be parallel queries
+          const stats: PostStats = {
+            postId,
+            likes: await this.countLikes(postId),
+            reposts: await this.countReposts(postId),
+            replies: await this.countReplies(postId),
+            views: 0
+          };
+          return stats
+        },
+        { ttl: 10000, tags: ['post:stats'] }
+      )
     } catch (error) {
       console.error('Error getting post stats:', error);
       return { postId, likes: 0, reposts: 0, replies: 0, views: 0 };

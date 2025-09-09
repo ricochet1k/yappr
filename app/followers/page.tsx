@@ -50,16 +50,7 @@ function FollowersPage() {
 
       const cacheKey = `followers_${user.identityId}`
       
-      // Check cache first unless force refresh
-      if (!forceRefresh) {
-        const cached = cacheManager.get<Follower[]>('followers', cacheKey)
-        if (cached) {
-          console.log('Followers: Using cached data')
-          setData(cached)
-          setLoading(false)
-          return
-        }
-      }
+      // Use cache to dedupe and persist results
 
       // Use followService to get followers list
       const follows = await followService.getFollowers(user.identityId, { limit: 50 })
@@ -68,7 +59,7 @@ function FollowersPage() {
 
       // Get unique identity IDs from followers
       const identityIds = follows
-        .map(f => f.$ownerId || f.ownerId)
+        .map(f => f.$ownerId || (f as any).ownerId)
         .filter(Boolean)
       
       if (identityIds.length === 0) {
@@ -112,10 +103,10 @@ function FollowersPage() {
       // Create maps for easy lookup
       const dpnsMap = new Map(dpnsNames.map(item => [item.id, item.username]))
       const allUsernamesMap = new Map(allUsernamesData.map(item => [item.id, item.usernames]))
-      const profileMap = new Map(profiles.map(p => [p.$ownerId || p.ownerId, p]))
+      const profileMap = new Map(profiles.map(p => [p.$ownerId || (p as any).ownerId, p]))
       
       // Create enriched user data
-      const followers = follows.map((follow: any) => {
+      const followers = (follows.map((follow: any) => {
         const followerId = follow.$ownerId || follow.ownerId
         if (!followerId) {
           console.warn('Follow document missing ownerId:', follow)
@@ -137,10 +128,10 @@ function FollowersPage() {
           isFollowingBack: followingBackMap.get(followerId) || false,
           allUsernames: allUsernames
         }
-      }).filter(Boolean) // Remove any null entries
+      }).filter(Boolean)) as Follower[] // Remove any null entries
 
       // Cache the results
-      cacheManager.set('followers', cacheKey, followers)
+      await cacheManager.getOrFetch('followers', cacheKey, async () => followers, { ttl: 60000, tags: ['followers'] })
       
       setData(followers)
       console.log(`Followers: Successfully loaded ${followers.length} followers`)

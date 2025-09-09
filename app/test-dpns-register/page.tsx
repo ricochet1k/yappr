@@ -42,11 +42,14 @@ export default function TestDpnsRegister() {
         setProgress('Preorder successful! Submitting domain document...');
       };
 
+      // Store private key via key manager for this test run
+      const { keyManager } = await import('@/lib/key-manager')
+      await keyManager.storePrivateKey(identityId, privateKey, { ttlMs: 10 * 60 * 1000 })
+
       const registrationResult = await dpnsService.registerUsername(
         username,
         identityId,
         parseInt(keyId),
-        privateKey,
         onPreorderSuccess
       );
 

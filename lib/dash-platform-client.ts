@@ -3,20 +3,21 @@
 // Import the WASM SDK functions we need
 import { 
   identity_fetch,
-  get_documents 
+  get_documents, 
+  WasmSdk
 } from './dash-wasm/wasm_sdk'
 
 // Import the centralized WASM service
 import { wasmSdkService } from './services/wasm-sdk-service'
 import { YAPPR_CONTRACT_ID } from './constants'
+import { cacheManager } from './cache-manager'
+import { keyManager } from './key-manager'
 
 export class DashPlatformClient {
-  private sdk: any = null
+  private sdk: WasmSdk | null = null
   private identityId: string | null = null
   private isInitializing: boolean = false
-  private postsCache: Map<string, { posts: any[], timestamp: number }> = new Map()
   private readonly CACHE_TTL = 30000 // 30 seconds for posts cache
-  private pendingQueries: Map<string, Promise<any[]>> = new Map() // Prevent duplicate queries
   
   constructor() {
     // SDK will be initialized on first use
@@ -108,27 +109,8 @@ export class DashPlatformClient {
       
       console.log('Creating post for identity:', identityId)
       
-      // Get the private key from secure storage (with biometric fallback)
-      const { getPrivateKey } = await import('./secure-storage')
-      let privateKeyWIF = getPrivateKey(identityId)
-      
-      // If not in memory, try biometric storage
-      if (!privateKeyWIF) {
-        try {
-          console.log('Private key not in memory, attempting biometric retrieval...')
-          const { getPrivateKeyWithBiometric } = await import('./biometric-storage')
-          privateKeyWIF = await getPrivateKeyWithBiometric(identityId)
-          
-          if (privateKeyWIF) {
-            console.log('Retrieved private key with biometric authentication')
-            // Also store in memory for this session to avoid repeated biometric prompts
-            const { storePrivateKey } = await import('./secure-storage')
-            storePrivateKey(identityId, privateKeyWIF, 3600000) // 1 hour TTL
-          }
-        } catch (e) {
-          console.log('Biometric retrieval failed:', e)
-        }
-      }
+      // Get the private key via centralized key manager (supports external wallets)
+      let privateKeyWIF = await keyManager.getPrivateKey(identityId)
       
       if (!privateKeyWIF) {
         throw new Error('Private key not found. Please log in again.')
@@ -181,7 +163,7 @@ export class DashPlatformClient {
       let result
       try {
         
-        result = await this.sdk.documentCreate(
+        result = await this.sdk!.documentCreate(
           contractId,
           'post',
           identityId,
@@ -209,7 +191,7 @@ export class DashPlatformClient {
       }
       
       // Invalidate posts cache since we created a new post
-      this.postsCache.clear()
+      cacheManager.invalidateByTag('doctype:post')
       
       // Convert result if needed
       if (result && typeof result.toJSON === 'function') {
@@ -244,7 +226,7 @@ export class DashPlatformClient {
       const contractId = YAPPR_CONTRACT_ID
       
       const profileResponse = await get_documents(
-        this.sdk,
+        this.sdk!,
         contractId,
         'profile',
         JSON.stringify(query.where),
@@ -295,38 +277,23 @@ export class DashPlatformClient {
         startAfter: options?.startAfter
       })
       
-      // Check if there's already a pending query for this exact request
-      if (!options?.forceRefresh && this.pendingQueries.has(cacheKey)) {
-        console.log('DashPlatformClient: Returning pending query result')
-        return await this.pendingQueries.get(cacheKey)!
-      }
-      
-      // Check cache first (unless force refresh)
-      if (!options?.forceRefresh) {
-        const cached = this.postsCache.get(cacheKey)
-        if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
-          console.log('DashPlatformClient: Returning cached posts')
-          return cached.posts
-        }
-      }
-      
       await this.ensureInitialized()
       
       const contractId = YAPPR_CONTRACT_ID
       
       console.log('DashPlatformClient: Querying posts from contract:', contractId)
       
-      // Create the query promise and store it to prevent duplicates
-      const queryPromise = this._executePostsQuery(contractId, options, cacheKey)
-      this.pendingQueries.set(cacheKey, queryPromise)
-      
-      try {
-        const result = await queryPromise
-        return result
-      } finally {
-        // Clean up the pending query
-        this.pendingQueries.delete(cacheKey)
-      }
+      // Use centralized cache with inflight deduplication
+      const cacheName = 'documents:post'
+      const result = await cacheManager.getOrFetch<any[]>(
+        cacheName,
+        cacheKey,
+        async () => {
+          return await this._executePostsQuery(contractId, options, cacheKey)
+        },
+        { ttl: this.CACHE_TTL, tags: ['doctype:post'] }
+      )
+      return result
     } catch (error) {
       console.error('DashPlatformClient: Failed to query posts:', error)
       throw error
@@ -351,7 +318,7 @@ export class DashPlatformClient {
       
       try {
         const postsResponse = await get_documents(
-          this.sdk,
+          this.sdk!,
           contractId,
           'post',
           where.length > 0 ? JSON.stringify(where) : null,
@@ -374,12 +341,6 @@ export class DashPlatformClient {
         }
         
         console.log(`DashPlatformClient: Found ${posts.length} posts`)
-        
-        // Cache the results
-        this.postsCache.set(cacheKey, {
-          posts,
-          timestamp: Date.now()
-        })
         
         return posts
       } catch (queryError) {
@@ -406,8 +367,7 @@ export class DashPlatformClient {
    * Clear the posts cache and pending queries
    */
   clearPostsCache() {
-    this.postsCache.clear()
-    this.pendingQueries.clear()
+    cacheManager.invalidateByTag('doctype:post')
     console.log('DashPlatformClient: Posts cache and pending queries cleared')
   }
   

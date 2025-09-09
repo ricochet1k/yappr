@@ -9,6 +9,7 @@ import {
   dpns_resolve_name 
 } from '../dash-wasm/wasm_sdk';
 import { DPNS_CONTRACT_ID, DPNS_DOCUMENT_TYPE } from '../constants';
+import { cacheManager } from '../cache-manager';
 
 interface DpnsDocument {
   $id: string;
@@ -31,18 +32,7 @@ interface DpnsDocument {
 }
 
 class DpnsService {
-  private cache: Map<string, { value: string; timestamp: number }> = new Map();
-  private reverseCache: Map<string, { value: string; timestamp: number }> = new Map();
   private readonly CACHE_TTL = 3600000; // 1 hour cache for DPNS
-
-  /**
-   * Helper method to cache entries in both directions
-   */
-  private _cacheEntry(username: string, identityId: string): void {
-    const now = Date.now();
-    this.cache.set(username.toLowerCase(), { value: identityId, timestamp: now });
-    this.reverseCache.set(identityId, { value: username, timestamp: now });
-  }
 
   /**
    * Get all usernames for an identity ID
@@ -137,30 +127,23 @@ class DpnsService {
    */
   async resolveUsername(identityId: string): Promise<string | null> {
     try {
-      // Check cache
-      const cached = this.reverseCache.get(identityId);
-      if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
-        console.log(`DPNS: Returning cached username for ${identityId}: ${cached.value}`);
-        return cached.value;
-      }
-
-      console.log(`DPNS: Fetching username for identity: ${identityId}`);
-      
-      // Get all usernames for this identity
-      const allUsernames = await this.getAllUsernames(identityId);
-      
-      if (allUsernames.length === 0) {
-        console.log(`DPNS: No username found for identity ${identityId}`);
-        return null;
-      }
-      
-      // Sort usernames with contested ones first
-      const sortedUsernames = this.sortUsernamesByContested(allUsernames);
-      const bestUsername = sortedUsernames[0];
-      
-      console.log(`DPNS: Found best username ${bestUsername} for identity ${identityId} (from ${allUsernames.length} total)`);
-      this._cacheEntry(bestUsername, identityId);
-      return bestUsername;
+      const cacheName = 'dpns:reverse'
+      return await cacheManager.getOrFetch<string | null>(
+        cacheName,
+        identityId,
+        async () => {
+          console.log(`DPNS: Fetching username for identity: ${identityId}`);
+          const allUsernames = await this.getAllUsernames(identityId);
+          if (allUsernames.length === 0) {
+            console.log(`DPNS: No username found for identity ${identityId}`);
+            return null;
+          }
+          const sortedUsernames = this.sortUsernamesByContested(allUsernames);
+          const bestUsername = sortedUsernames[0];
+          return bestUsername;
+        },
+        { ttl: this.CACHE_TTL, tags: ['dpns'] }
+      )
     } catch (error) {
       console.error('DPNS: Error resolving username:', error);
       return null;
@@ -173,62 +156,57 @@ class DpnsService {
   async resolveIdentity(username: string): Promise<string | null> {
     try {
       const normalizedUsername = username.toLowerCase().replace('.dash', '');
-      
-      // Check cache
-      const cached = this.cache.get(normalizedUsername);
-      if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
-        console.log(`DPNS: Returning cached identity for ${normalizedUsername}: ${cached.value}`);
-        return cached.value;
-      }
-
-      console.log(`DPNS: Resolving identity for username: ${normalizedUsername}`);
-      
-      const sdk = await getWasmSdk();
-      
-      // Try native resolution first
-      try {
-        const result = await dpns_resolve_name(sdk, normalizedUsername);
-        if (result && result.identity_id) {
-          console.log(`DPNS: Found identity ${result.identity_id} for username ${normalizedUsername} via native resolver`);
-          this._cacheEntry(normalizedUsername, result.identity_id);
-          return result.identity_id;
-        }
-      } catch (error) {
-        console.warn('DPNS: Native resolver failed, trying document query:', error);
-      }
-      
-      // Fallback: Query DPNS documents
-      const parts = normalizedUsername.split('.');
-      const label = parts[0];
-      const parentDomain = parts.slice(1).join('.') || 'dash';
-      
-      const response = await get_documents(
-        sdk,
-        DPNS_CONTRACT_ID,
-        DPNS_DOCUMENT_TYPE,
-        JSON.stringify([
-          ['normalizedLabel', '==', label.toLowerCase()],
-          ['normalizedParentDomainName', '==', parentDomain.toLowerCase()]
-        ]),
-        null,
-        1,
-        null,
-        null
-      );
-      
-      if (response && response.documents && response.documents.length > 0) {
-        const dpnsDoc = response.documents[0] as DpnsDocument;
-        const identityId = dpnsDoc.records.identity || dpnsDoc.records.dashUniqueIdentityId || dpnsDoc.records.dashAliasIdentityId;
-        
-        if (identityId) {
-          console.log(`DPNS: Found identity ${identityId} for username ${normalizedUsername} via document query`);
-          this._cacheEntry(normalizedUsername, identityId);
-          return identityId;
-        }
-      }
-      
-      console.log(`DPNS: No identity found for username ${normalizedUsername}`);
-      return null;
+      const cacheName = 'dpns:forward'
+      return await cacheManager.getOrFetch<string | null>(
+        cacheName,
+        normalizedUsername,
+        async () => {
+          console.log(`DPNS: Resolving identity for username: ${normalizedUsername}`);
+          const sdk = await getWasmSdk();
+          // Try native resolution first
+          try {
+            const result = await dpns_resolve_name(sdk, normalizedUsername);
+            if (result && result.identity_id) {
+              console.log(`DPNS: Found identity ${result.identity_id} for username ${normalizedUsername} via native resolver`);
+              return result.identity_id;
+            }
+          } catch (error) {
+            console.warn('DPNS: Native resolver failed, trying document query:', error);
+          }
+          
+          // Fallback: Query DPNS documents
+          const parts = normalizedUsername.split('.');
+          const label = parts[0];
+          const parentDomain = parts.slice(1).join('.') || 'dash';
+          
+          const response = await get_documents(
+            sdk,
+            DPNS_CONTRACT_ID,
+            DPNS_DOCUMENT_TYPE,
+            JSON.stringify([
+              ['normalizedLabel', '==', label.toLowerCase()],
+              ['normalizedParentDomainName', '==', parentDomain.toLowerCase()]
+            ]),
+            null,
+            1,
+            null,
+            null
+          );
+          
+          if (response && response.documents && response.documents.length > 0) {
+            const dpnsDoc = response.documents[0] as DpnsDocument;
+            const identityId = dpnsDoc.records.identity || dpnsDoc.records.dashUniqueIdentityId || dpnsDoc.records.dashAliasIdentityId;
+            if (identityId) {
+              console.log(`DPNS: Found identity ${identityId} for username ${normalizedUsername} via document query`);
+              return identityId;
+            }
+          }
+          
+          console.log(`DPNS: No identity found for username ${normalizedUsername}`);
+          return null;
+        },
+        { ttl: this.CACHE_TTL, tags: ['dpns'] }
+      )
     } catch (error) {
       console.error('DPNS: Error resolving identity:', error);
       return null;
@@ -404,7 +382,6 @@ class DpnsService {
     label: string, 
     identityId: string, 
     publicKeyId: number,
-    privateKeyWif: string,
     onPreorderSuccess?: () => void
   ): Promise<any> {
     try {
@@ -423,6 +400,13 @@ class DpnsService {
       const isAvailable = await dpns_is_name_available(sdk, label);
       if (!isAvailable) {
         throw new Error(`Username ${label} is already taken`);
+      }
+
+      // Resolve private key via centralized key manager
+      const { keyManager } = await import('../key-manager');
+      const privateKeyWif = await keyManager.getPrivateKey(identityId);
+      if (!privateKeyWif) {
+        throw new Error('Private key not available. Please log in again.');
       }
 
       // Register the name
@@ -512,14 +496,14 @@ class DpnsService {
    */
   clearCache(username?: string, identityId?: string): void {
     if (username) {
-      this.cache.delete(username.toLowerCase());
+      cacheManager.delete('dpns:forward', username.toLowerCase())
     }
     if (identityId) {
-      this.reverseCache.delete(identityId);
+      cacheManager.delete('dpns:reverse', identityId)
     }
     if (!username && !identityId) {
-      this.cache.clear();
-      this.reverseCache.clear();
+      cacheManager.clear('dpns:forward')
+      cacheManager.clear('dpns:reverse')
     }
   }
 
@@ -527,21 +511,7 @@ class DpnsService {
    * Clean up expired cache entries
    */
   cleanupCache(): void {
-    const now = Date.now();
-    
-    // Clean forward cache
-    for (const [key, value] of Array.from(this.cache.entries())) {
-      if (now - value.timestamp > this.CACHE_TTL) {
-        this.cache.delete(key);
-      }
-    }
-    
-    // Clean reverse cache
-    for (const [key, value] of Array.from(this.reverseCache.entries())) {
-      if (now - value.timestamp > this.CACHE_TTL) {
-        this.reverseCache.delete(key);
-      }
-    }
+    // No-op; cacheManager handles cleanup globally
   }
 }
 

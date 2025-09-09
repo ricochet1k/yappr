@@ -17,8 +17,9 @@ export default function TestCreatePage() {
       setStatus('Creating post...')
       setError(null)
       
-      // Store private key in session for state transitions
-      sessionStorage.setItem('yappr_pk', privateKey)
+      // Store private key via key manager for state transitions
+      const { keyManager } = await import('@/lib/key-manager')
+      await keyManager.storePrivateKey(identityId, privateKey, { ttlMs: 3600000 })
       
       const post = await postService.createPost(
         identityId,
@@ -42,8 +43,9 @@ export default function TestCreatePage() {
       setStatus('Creating profile...')
       setError(null)
       
-      // Store private key in session for state transitions
-      sessionStorage.setItem('yappr_pk', privateKey)
+      // Store private key via key manager for state transitions
+      const { keyManager } = await import('@/lib/key-manager')
+      await keyManager.storePrivateKey(identityId, privateKey, { ttlMs: 3600000 })
       
       const profile = await profileService.createProfile(
         identityId,

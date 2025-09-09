@@ -16,6 +16,7 @@ function CreateProfilePage() {
   const [showPrivateKeyInput, setShowPrivateKeyInput] = useState(false)
   const [privateKey, setPrivateKey] = useState('')
   const [isCheckingProfile, setIsCheckingProfile] = useState(true)
+  const [hasPrivateKey, setHasPrivateKey] = useState(false)
   
   const [formData, setFormData] = useState({
     displayName: '',
@@ -30,6 +31,11 @@ function CreateProfilePage() {
       if (!user) return
       
       try {
+        // Check for a stored private key via key manager
+        const { keyManager } = await import('@/lib/key-manager')
+        const pk = await keyManager.getPrivateKey(user.identityId)
+        setHasPrivateKey(!!pk)
+
         const { profileService } = await import('@/lib/services/profile-service')
         const existingProfile = await profileService.getProfile(user.identityId)
         
@@ -55,8 +61,9 @@ function CreateProfilePage() {
       return
     }
     
-    // Check if private key is in session storage
-    const storedPrivateKey = sessionStorage.getItem('yappr_pk')
+    // Check if private key is available via key manager
+    const { keyManager } = await import('@/lib/key-manager')
+    const storedPrivateKey = user ? await keyManager.getPrivateKey(user.identityId) : null
     if (!storedPrivateKey && !privateKey) {
       setShowPrivateKeyInput(true)
       toast.error('Please enter your private key to continue')
@@ -64,8 +71,9 @@ function CreateProfilePage() {
     }
     
     // If private key was entered, store it
-    if (privateKey && !storedPrivateKey) {
-      sessionStorage.setItem('yappr_pk', privateKey)
+    if (privateKey && !storedPrivateKey && user) {
+      await keyManager.storePrivateKey(user.identityId, privateKey, { ttlMs: 3600000 })
+      setHasPrivateKey(true)
     }
     
     setIsSubmitting(true)
@@ -242,7 +250,7 @@ function CreateProfilePage() {
             <p className="text-sm text-gray-600 dark:text-gray-400">
               Identity: {user?.identityId.slice(0, 8)}...
             </p>
-            {!sessionStorage.getItem('yappr_pk') && (
+            {!hasPrivateKey && (
               <button
                 type="button"
                 onClick={() => setShowPrivateKeyInput(!showPrivateKeyInput)}

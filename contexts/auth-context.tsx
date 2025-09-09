@@ -134,21 +134,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       localStorage.setItem('yappr_session', JSON.stringify(sessionData))
 
-      // Store private key securely in memory for this session only
-      // This is needed for signing transactions
-      const { storePrivateKey } = await import('@/lib/secure-storage')
-      storePrivateKey(identityId, privateKey, 3600000) // 1 hour TTL
-      
-      // Also try to store with biometric protection for longer-term access
-      try {
-        const { storePrivateKeyWithBiometric } = await import('@/lib/biometric-storage')
-        const stored = await storePrivateKeyWithBiometric(identityId, privateKey)
-        if (stored) {
-          console.log('Private key stored with biometric protection')
-        }
-      } catch (e) {
-        console.log('Biometric storage not available:', e)
-      }
+      // Store private key via centralized key manager
+      const { keyManager } = await import('@/lib/key-manager')
+      await keyManager.storePrivateKey(identityId, privateKey, { ttlMs: 3600000, persistBiometric: true })
 
       setUser(authUser)
       
@@ -197,10 +185,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     sessionStorage.removeItem('yappr_dpns_username')
     sessionStorage.removeItem('yappr_skip_dpns')
     
-    // Clear private key from secure storage
+    // Clear private key via key manager
     if (user?.identityId) {
-      const { clearPrivateKey } = await import('@/lib/secure-storage')
-      clearPrivateKey(user.identityId)
+      const { keyManager } = await import('@/lib/key-manager')
+      await keyManager.clearPrivateKey(user.identityId)
     }
     
     setUser(null)
@@ -212,7 +200,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     })
     
     router.push('/login')
-  }, [router])
+  }, [router, user?.identityId])
   
   const updateDPNSUsername = useCallback((username: string) => {
     if (user) {

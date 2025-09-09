@@ -83,7 +83,7 @@ class BiometricStorage {
       // Store credential ID and public key for later use
       const storedCred: StoredCredential = {
         credentialId: this.arrayBufferToBase64(credential.rawId),
-        publicKey: credential.response.publicKey!
+        publicKey: (credential.response as AuthenticatorAttestationResponse).getPublicKey()!
       }
       
       localStorage.setItem(this.CREDENTIAL_KEY, JSON.stringify({
@@ -141,9 +141,9 @@ class BiometricStorage {
       
       // Store encrypted data with metadata
       const encryptedData: EncryptedData = {
-        iv: this.arrayBufferToBase64(iv),
+        iv: this.arrayBufferToBase64(iv.buffer),
         ciphertext: this.arrayBufferToBase64(encrypted),
-        salt: this.arrayBufferToBase64(salt),
+        salt: this.arrayBufferToBase64(salt.buffer),
         credentialId: credentialData?.credentialId || ''
       }
       

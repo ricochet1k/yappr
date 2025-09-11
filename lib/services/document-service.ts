@@ -61,19 +61,19 @@ export abstract class BaseDocumentService<T> {
 
       console.log(`Querying ${this.documentType} documents:`, query);
       
-      const cacheKey = JSON.stringify({
+      const cacheKeyObject = {
         where: query.where || null,
         orderBy: query.orderBy || null,
         limit: query.limit || 25,
         startAfter: query.startAfter || null,
         startAt: query.startAt || null
-      })
+      }
 
       const cacheName = `documents:${this.documentType}`
 
-      const response = await cacheManager.getOrFetch<any>(
+      const response = await cacheManager.getOrFetchByObject<any>(
         cacheName,
-        cacheKey,
+        cacheKeyObject,
         async () => {
           return await get_documents(
             sdk,

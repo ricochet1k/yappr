@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { motion } from 'framer-motion'
 import { SparklesIcon, ArrowPathIcon } from '@heroicons/react/24/outline'
-import { PostCard } from '@/components/post/post-card'
+import { Post as PostItem } from '@/components/post/post'
 import { Sidebar } from '@/components/layout/sidebar'
 import { RightSidebar } from '@/components/layout/right-sidebar'
 import { ComposeModal } from '@/components/compose/compose-modal'
@@ -16,8 +16,8 @@ import { AvatarCanvas } from '@/components/ui/avatar-canvas'
 import { generateAvatarV2 } from '@/lib/avatar-generator-v2'
 import { LoadingState, useAsyncState } from '@/components/ui/loading-state'
 import ErrorBoundary from '@/components/error-boundary'
-import { getDashPlatformClient } from '@/lib/dash-platform-client'
-import { cacheManager } from '@/lib/cache-manager'
+import { postService } from '@/lib/services'
+// Note: caching is handled within BaseDocumentService via cacheManager
 
 function FeedPage() {
   const [activeTab, setActiveTab] = useState('for-you')
@@ -34,7 +34,7 @@ function FeedPage() {
   // Generate avatar based on identity ID (only after hydration)
   const avatarFeatures = user && isHydrated ? generateAvatarV2(user.identityId) : null
   
-  // Load posts function - using real WASM SDK with updated version
+  // Load posts function - using real WASM SDK with client-side caching in DashPlatformClient
   const loadPosts = useCallback(async (forceRefresh: boolean = false) => {
     // Use the setter functions directly, not the whole postsState object
     const { setLoading, setError, setData } = postsState
@@ -45,67 +45,27 @@ function FeedPage() {
     try {
       console.log('Feed: Loading posts from Dash Platform...')
       
-      const dashClient = getDashPlatformClient()
-      
-      // Cache key based on active tab and user
-      const cacheKey = activeTab === 'your-posts' && user?.identityId 
-        ? `feed_your_posts_${user.identityId}`
-        : `feed_${activeTab}`
-      
-      // Use centralized cache to dedupe and persist the feed
-      const sortedPosts = await cacheManager.getOrFetch<any[]>(
-        'feed',
-        cacheKey,
-        async () => {
-          // Query posts from the platform
-          const queryOptions: any = {
-            limit: 20,
-            forceRefresh: false
-          }
-          if (activeTab === 'your-posts' && user?.identityId) {
-            queryOptions.authorId = user.identityId
-            console.log('Feed: Filtering posts by user:', user.identityId)
-          } else {
-            console.log('Feed: Loading all posts for:', activeTab)
-          }
-          const posts = await dashClient.queryPosts(queryOptions)
-          // Transform posts to match our UI format
-          const transformed = await Promise.all(posts.map(async (doc: any) => {
-            const data = doc.data || doc
-            const authorIdStr = doc.ownerId || 'unknown'
-            return {
-              id: doc.id || Math.random().toString(36).substr(2, 9),
-              content: data.content || 'No content',
-              author: {
-                id: authorIdStr,
-                username: `user_${authorIdStr.slice(-6)}`,
-                handle: `user_${authorIdStr.slice(-6)}`,
-                displayName: `User ${authorIdStr.slice(-6)}`,
-                verified: false
-              },
-              createdAt: doc.createdAt ? new Date(doc.createdAt).toISOString() : new Date().toISOString(),
-              likes: Math.floor(Math.random() * 50),
-              replies: Math.floor(Math.random() * 20),
-              reposts: Math.floor(Math.random() * 10),
-              liked: false,
-              reposted: false,
-              bookmarked: false
-            }
-          }))
-          // Sort by createdAt newest first
-          return transformed.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-        },
-        { ttl: 30000, tags: ['feed'] }
-      )
-      
-      
+      // Query posts directly; DashPlatformClient handles caching and ordering
+      let posts: any[] = []
+      if (activeTab === 'your-posts' && user?.identityId) {
+        console.log('Feed: Filtering posts by user:', user.identityId)
+        const result = await postService.getUserPosts(user.identityId, { limit: 20 })
+        posts = result.documents
+      } else {
+        console.log('Feed: Loading all posts for:', activeTab)
+        const result = await postService.getTimeline({ limit: 20 })
+        posts = result.documents
+      }
+
       // If no posts found, show helpful message but don't error
-      if (sortedPosts.length === 0) {
+      if (!posts || posts.length === 0) {
         console.log('Feed: No posts found on platform')
         setData([])
       } else {
-        setData(sortedPosts)
-        console.log(`Feed: Successfully loaded ${sortedPosts.length} posts (newest first)`)
+        // Ensure newest first if platform doesn't already return sorted
+        // postService already orders by $createdAt desc, but ensure Date type
+        setData(posts)
+        console.log(`Feed: Successfully loaded ${posts.length} posts (newest first)`)
       }
       
     } catch (error) {
@@ -236,12 +196,12 @@ function FeedPage() {
             emptyDescription="Be the first to share something! Note: Dash Platform testnet may be temporarily unavailable."
           >
             <div>
-              {postsState.data?.map((post) => (
+              {postsState.data?.map((post: any) => (
                 <ErrorBoundary key={post.id} level="component">
-                  <PostCard 
-                    post={post} 
-                    hideAvatar={activeTab === 'your-posts'} 
-                    isOwnPost={user?.identityId === post.author.id}
+                  <PostItem 
+                    post={post}
+                    hideAvatar={activeTab === 'your-posts'}
+                    currentUserId={user?.identityId || null}
                   />
                 </ErrorBoundary>
               ))}

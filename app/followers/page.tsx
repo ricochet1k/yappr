@@ -48,10 +48,6 @@ function FollowersPage() {
         return
       }
 
-      const cacheKey = `followers_${user.identityId}`
-      
-      // Use cache to dedupe and persist results
-
       // Use followService to get followers list
       const follows = await followService.getFollowers(user.identityId, { limit: 50 })
       
@@ -117,10 +113,11 @@ function FollowersPage() {
         const allUsernames = allUsernamesMap.get(followerId) || []
         const profile = profileMap.get(followerId)
         
+        const shortId = `${followerId.slice(0, 6)}…`
         return {
           id: followerId,
-          username: username || `user_${followerId.slice(-6)}`,
-          displayName: profile?.displayName || username || `User ${followerId.slice(-6)}`,
+          username: username || shortId,
+          displayName: profile?.displayName || username || shortId,
           bio: profile?.bio || (profile ? 'Yappr user' : 'Not yet on Yappr'),
           hasProfile: !!profile,
           followersCount: 0, // Would need to query this
@@ -131,6 +128,7 @@ function FollowersPage() {
       }).filter(Boolean)) as Follower[] // Remove any null entries
 
       // Cache the results
+      const cacheKey = `followers:${user!.identityId}`
       await cacheManager.getOrFetch('followers', cacheKey, async () => followers, { ttl: 60000, tags: ['followers'] })
       
       setData(followers)

@@ -8,6 +8,9 @@ import { Button } from '@/components/ui/button'
 import { LoadingState } from '@/components/ui/loading-state'
 import { useAsyncState } from '@/components/ui/loading-state'
 import { likeService, LikeDocument } from '@/lib/services/like-service'
+import { dpnsService, profileService } from '@/lib/services'
+import { AuthorDisplay } from '@/components/author/author-display'
+import { User } from '@/lib/types'
 import { formatTime } from '@/lib/utils'
 
 interface LikesModalProps {
@@ -17,8 +20,7 @@ interface LikesModalProps {
 }
 
 interface LikeWithUser extends LikeDocument {
-  username?: string
-  displayName?: string
+  author?: Partial<User> & { id: string }
 }
 
 export function LikesModal({ isOpen, onClose, postId }: LikesModalProps) {
@@ -33,13 +35,32 @@ export function LikesModal({ isOpen, onClose, postId }: LikesModalProps) {
       // Fetch actual likes from Dash Platform
       const likes = await likeService.getPostLikes(postId)
       
-      // Transform likes to include user info
-      // For now, we'll generate usernames from the ownerId
-      const likesWithUsers: LikeWithUser[] = likes.map(like => ({
-        ...like,
-        username: `user_${like.$ownerId.slice(-6)}`,
-        displayName: `User ${like.$ownerId.slice(-6)}`
-      }))
+      // Enrich likes with author info using DPNS + profile, with safe fallbacks
+      const ownerIds = Array.from(new Set(likes.map(l => l.$ownerId).filter(Boolean)))
+      const [usernames, profiles] = await Promise.all([
+        Promise.all(ownerIds.map(async (id) => ({ id, username: await dpnsService.resolveUsername(id) }))),
+        profileService.getProfilesByIdentityIds(ownerIds)
+      ])
+      const usernameMap = new Map(usernames.map(u => [u.id, u.username]))
+      const profileMap = new Map(profiles.map(p => [p.$ownerId || (p as any).ownerId, p]))
+
+      const likesWithUsers: LikeWithUser[] = likes.map(like => {
+        const id = like.$ownerId
+        const shortId = id ? `${id.slice(0, 6)}…` : 'unknown'
+        const profile = profileMap.get(id)
+        const username = usernameMap.get(id) || shortId
+        const displayName = (profile?.displayName as string | undefined) || username || shortId
+        const author: Partial<User> & { id: string } = {
+          id,
+          username,
+          displayName,
+          verified: false,
+        }
+        return {
+          ...like,
+          author,
+        }
+      })
       
       setData(likesWithUsers)
     } catch (error) {
@@ -90,10 +111,7 @@ export function LikesModal({ isOpen, onClose, postId }: LikesModalProps) {
                         <Avatar>
                           <AvatarFallback>{like.$ownerId.slice(0, 2).toUpperCase()}</AvatarFallback>
                         </Avatar>
-                        <div>
-                          <p className="font-semibold">{like.displayName}</p>
-                          <p className="text-sm text-gray-500">@{like.username} · {formatTime(new Date(like.$createdAt))}</p>
-                        </div>
+                        <AuthorDisplay author={like.author || { id: like.$ownerId }} createdAt={new Date(like.$createdAt)} />
                       </div>
                       <Button variant="outline" size="sm">
                         Follow

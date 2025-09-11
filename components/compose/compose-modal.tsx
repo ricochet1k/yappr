@@ -41,19 +41,20 @@ export function ComposeModal() {
     const postContent = content.trim()
     
     try {
-      const { getDashPlatformClient } = await import('@/lib/dash-platform-client')
       const { retryPostCreation, isNetworkError } = await import('@/lib/retry-utils')
-      
-      console.log('Creating post with Dash SDK...')
-      
+      const { postService } = await import('@/lib/services')
+
+      console.log('Creating post via postService...')
+
       // Use retry logic for post creation
       const result = await retryPostCreation(async () => {
-        const dashClient = getDashPlatformClient()
-        return await dashClient.createPost(postContent, {
-          replyToPostId: replyingTo?.id
+        if (!user?.identityId) throw new Error('Not logged in')
+        const post = await postService.createPost(user.identityId, postContent, {
+          replyToId: replyingTo?.id
         })
+        return post
       })
-      
+
       if (result.success) {
         toast.success('Post created successfully!')
         

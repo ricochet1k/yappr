@@ -34,6 +34,24 @@ export class CacheManager {
   }
 
   /**
+   * Stable stringify for cache keys (sorts object keys recursively)
+   */
+  static safeStringify(value: any): string {
+    const seen = new WeakSet()
+    const stringify = (val: any): any => {
+      if (val === null || typeof val !== 'object') return val
+      if (seen.has(val)) return '[Circular]'
+      seen.add(val)
+      if (Array.isArray(val)) return val.map(stringify)
+      const keys = Object.keys(val).sort()
+      const out: any = {}
+      for (const k of keys) out[k] = stringify(val[k])
+      return out
+    }
+    return JSON.stringify(stringify(value))
+  }
+
+  /**
    * Get or create a named cache
    */
   private getCache(cacheName: string): Map<string, CacheEntry<any>> {
@@ -291,7 +309,9 @@ export class CacheManager {
       })
     }
 
-    console.log(`Cache cleanup: removed ${cleaned} expired entries`)
+    if (cleaned > 0) {
+      console.log(`Cache cleanup: removed ${cleaned} expired entries`)
+    }
     return cleaned
   }
 
@@ -367,129 +387,83 @@ export class CacheManager {
   /**
    * Fetch a batch of keys with a single call. Caches each key separately.
    */
-  async getOrFetchBatch<T>(
+  /** Convenience: object-key variant (use JSON.stringify with stable order) */
+  async getOrFetchByObject<T>(
     cacheName: string,
-    keys: string[],
-    batchFetcher: (missingKeys: string[]) => Promise<Record<string, T>>, // returns mapping
+    keyObject: any,
+    fetcher: () => Promise<T>,
     options: CacheOptions = {}
-  ): Promise<Record<string, T>> {
-    const result: Record<string, T> = {}
-    const missing: string[] = []
+  ): Promise<T> {
+    const key = CacheManager.safeStringify(keyObject)
+    return this.getOrFetch(cacheName, key, fetcher, options)
+  }
+}
 
-    // Resolve cached
-    for (const key of keys) {
-      const cached = this.get<T>(cacheName, key)
-      if (cached !== null) {
-        result[key] = cached
-      } else {
-        missing.push(key)
-      }
-    }
+/**
+ * Strongly-typed batcher factory using object keys and stable stringification.
+ */
+export function createBatcher<K, T>(config: {
+  cacheName: string
+  delayMs?: number
+  ttl?: number
+  tags?: string[]
+  handler: (entries: Array<{ original: K; resolve: (v: T) => void; reject: (e: any) => void }>) => Promise<void>
+}) {
+  const { cacheName, delayMs = 25, ttl, tags, handler } = config
+  let timer: number | NodeJS.Timeout | undefined
+  type Resolver = { resolve: (v: T) => void; reject: (e: any) => void }
+  type Entry = { original: K; resolvers: Resolver[]; settled: boolean; resolve: (v: T) => void; reject: (e: any) => void }
+  let batch = new Map<string, Entry>()
 
-    // If all cached, return
-    if (missing.length === 0) return result
-
-    // Deduplicate inflight per key
-    const fetchNeeded: string[] = []
-    const awaiting: Array<Promise<void>> = []
-
-    for (const key of missing) {
-      const inflightKey = `${cacheName}:${key}`
-      const existing = this.inflight.get(inflightKey)
-      if (existing) {
-        awaiting.push(existing.then((v: any) => { result[key] = this.get<T>(cacheName, key)! }))
-      } else {
-        fetchNeeded.push(key)
-      }
-    }
-
-    // Fire batch fetch for those not already inflight
-    if (fetchNeeded.length > 0) {
-      const inflightKeys = fetchNeeded.map(k => `${cacheName}:${k}`)
-      const p = (async () => {
-        try {
-          const fetched = await batchFetcher(fetchNeeded)
-          for (const k of fetchNeeded) {
-            if (k in fetched) {
-              const val = fetched[k]
-              this.set(cacheName, k, val, options)
-              result[k] = val
-            }
-          }
-        } finally {
-          inflightKeys.forEach(k => this.inflight.delete(k))
+  async function runBatch() {
+    timer = undefined
+    const current = batch
+    batch = new Map<string, Entry>()
+    try {
+      const entries = Array.from(current.values())
+      await handler(entries)
+      // Fail any unresolved entries to avoid hanging promises
+      current.forEach((entry, k) => {
+        if (!entry.settled) {
+          entry.resolvers.forEach(r => r.reject(new Error('Missing batched result for key: ' + k)))
         }
-      })()
-      inflightKeys.forEach(k => this.inflight.set(k, p))
-      awaiting.push(p.then(() => {}))
+      })
+    } catch (e) {
+      current.forEach((entry) => entry.resolvers.forEach(r => r.reject(e)))
     }
-
-    await Promise.all(awaiting)
-    return result
   }
 
-  /**
-   * Enqueue a key for a named batch within a small delay window, then resolve via handler.
-   */
-  enqueueBatch<T>(
-    batchName: string,
-    key: string,
-    handler: (keys: string[]) => Promise<Record<string, T>>,
-    options: CacheOptions & { delayMs?: number } = {}
-  ): Promise<T> {
-    const delayMs = options.delayMs ?? 25
-    if (!this.batchQueues.has(batchName)) {
-      this.batchQueues.set(batchName, {
-        keys: new Set(),
-        resolvers: new Map(),
-        options: { ttl: options.ttl, tags: options.tags, delayMs },
-        handler: handler as any
-      })
-    }
-
-    const queue = this.batchQueues.get(batchName)!
-
-    return new Promise<T>((resolve, reject) => {
-      queue.keys.add(key)
-      queue.resolvers.set(key, { resolve, reject })
-
-      if (queue.timer) return
-      queue.timer = setTimeout(async () => {
-        const keys = Array.from(queue.keys)
-        const resolvers = new Map(queue.resolvers)
-        // reset queue
-        queue.keys.clear()
-        queue.resolvers.clear()
-        queue.timer = undefined
-
-        try {
-          const data = await queue.handler(keys)
-          for (const k of keys) {
-            const r = resolvers.get(k)
-            if (!r) continue
-            if (k in data) {
-              r.resolve(data[k])
-            } else {
-              r.reject(new Error('Missing batched result for key: ' + k))
-            }
+  // Return a lightweight enqueue function
+  return async function enqueue(keyObject: K): Promise<T> {
+    const key = CacheManager.safeStringify(keyObject)
+    return cacheManager.getOrFetch<T>(
+      cacheName,
+      key,
+      () => new Promise<T>((resolve, reject) => {
+        const existing = batch.get(key)
+        if (existing) {
+          existing.resolvers.push({ resolve, reject })
+        } else {
+          const entry: Entry = {
+            original: keyObject,
+            resolvers: [{ resolve, reject }],
+            settled: false,
+            resolve: (v: T) => { entry.settled = true; entry.resolvers.forEach(r => r.resolve(v)) },
+            reject: (e: any) => { entry.settled = true; entry.resolvers.forEach(r => r.reject(e)) }
           }
-        } catch (e) {
-          resolvers.forEach((r) => r.reject(e))
+          batch.set(key, entry)
         }
-      }, delayMs) as any
-    })
+        if (!timer) {
+          timer = setTimeout(runBatch, delayMs)
+        }
+      }),
+      { ttl, tags }
+    )
   }
 }
 
 // Singleton instance
 export const cacheManager = new CacheManager()
-
-// Cleanup on page unload
-if (typeof window !== 'undefined') {
-  window.addEventListener('beforeunload', () => {
-    cacheManager.stopCleanup()
-  })
-}
 
 /**
  * Cache decorator for methods

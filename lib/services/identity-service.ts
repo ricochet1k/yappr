@@ -120,21 +120,7 @@ class IdentityService {
       cacheManager.clear('identity:balance')
     }
   }
-
-  /**
-   * Clear expired cache entries
-   */
-  cleanupCache(): void {
-    // No-op; cacheManager handles cleanup
-  }
 }
 
 // Singleton instance
 export const identityService = new IdentityService();
-
-// Set up periodic cache cleanup
-if (typeof window !== 'undefined') {
-  setInterval(() => {
-    identityService.cleanupCache();
-  }, 60000); // Clean up every minute
-}

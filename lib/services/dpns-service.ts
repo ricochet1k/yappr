@@ -1,4 +1,3 @@
-import { getWasmSdk } from './wasm-sdk-service';
 import { 
   get_documents,
   dpns_convert_to_homograph_safe,
@@ -9,7 +8,8 @@ import {
   dpns_resolve_name 
 } from '../dash-wasm/wasm_sdk';
 import { DPNS_CONTRACT_ID, DPNS_DOCUMENT_TYPE } from '../constants';
-import { cacheManager } from '../cache-manager';
+import { cacheManager, createBatcher, CacheManager } from '../cache-manager';
+import { getWasmSdk } from './wasm-sdk-service';
 
 interface DpnsDocument {
   $id: string;
@@ -31,6 +31,126 @@ interface DpnsDocument {
   };
 }
 
+// Batchers
+const enqueueAllUsernames = createBatcher<{ identityId: string }, string[]>({
+  cacheName: 'dpns:usernames',
+  delayMs: 25,
+  ttl: 3600000,
+  tags: ['dpns'],
+  handler: async (entries) => {
+    const ids = entries.map(e => e.original.identityId)
+    const sdk = await getWasmSdk()
+    const where = [['records.identity', 'in', ids]]
+    const resp = await get_documents(
+      sdk,
+      DPNS_CONTRACT_ID,
+      DPNS_DOCUMENT_TYPE,
+      JSON.stringify(where),
+      null,
+      200,
+      null,
+      null
+    )
+    const docs = Array.isArray(resp) ? resp : (resp?.documents || [])
+    const byIdentity = new Map<string, string[]>()
+    for (const doc of docs as any[]) {
+      const rec = (doc.records || (doc.data && doc.data.records)) || {}
+      const identity = rec.identity || rec.dashUniqueIdentityId || rec.dashAliasIdentityId
+      const label = (doc.label || (doc.data && doc.data.label)) as string
+      const parent = (doc.normalizedParentDomainName || (doc.data && doc.data.normalizedParentDomainName) || 'dash') as string
+      if (identity && label) {
+        const list = byIdentity.get(identity) || []
+        list.push(`${label}.${parent}`)
+        byIdentity.set(identity, list)
+      }
+    }
+    // Resolve for each entry
+    for (const entry of entries) {
+      const list = byIdentity.get(entry.original.identityId) || []
+      entry.resolve(list)
+    }
+  }
+})
+
+const enqueueBestUsernameByIdentity = createBatcher<{ identityId: string }, string | null>({
+  cacheName: 'dpns:reverse',
+  delayMs: 25,
+  ttl: 3600000,
+  tags: ['dpns'],
+  handler: async (entries) => {
+    const ids = entries.map(e => e.original.identityId)
+    const allMap = await Promise.all(ids.map(id => enqueueAllUsernames({ identityId: id })))
+    entries.forEach((entry, idx) => {
+      const names = allMap[idx] || []
+      if (names.length === 0) {
+        entry.resolve(null)
+      } else {
+        const sorted = names.sort((a, b) => {
+          const la = a.split('.')[0]
+          const lb = b.split('.')[0]
+          const ca = dpns_is_contested_username(la) ? 1 : 0
+          const cb = dpns_is_contested_username(lb) ? 1 : 0
+          if (ca !== cb) return cb - ca
+          return a.localeCompare(b)
+        })
+        entry.resolve(sorted[0])
+      }
+    })
+  }
+})
+
+const enqueueIdentityByUsername = createBatcher<{ label: string; parent?: string }, string | null>({
+  cacheName: 'dpns:forward',
+  delayMs: 25,
+  ttl: 3600000,
+  tags: ['dpns'],
+  handler: async (entries) => {
+    const sdk = await getWasmSdk()
+    // normalize and bucket by parent
+    const normalized = entries.map(e => ({ label: e.original.label.toLowerCase(), parent: (e.original.parent || 'dash').toLowerCase() }))
+    const byParent = new Map<string, Set<string>>()
+    normalized.forEach(({ label, parent }) => {
+      if (!byParent.has(parent)) byParent.set(parent, new Set())
+      byParent.get(parent)!.add(label)
+    })
+    const parentKeys = Array.from(byParent.keys())
+    for (let i = 0; i < parentKeys.length; i++) {
+      const parent = parentKeys[i]
+      const labels = Array.from(byParent.get(parent)!)
+      const where = [
+        ['normalizedLabel', 'in', labels],
+        ['normalizedParentDomainName', '==', parent]
+      ]
+      const resp = await get_documents(
+        sdk,
+        DPNS_CONTRACT_ID,
+        DPNS_DOCUMENT_TYPE,
+        JSON.stringify(where),
+        null,
+        200,
+        null,
+        null
+      )
+      const docs = Array.isArray(resp) ? resp : (resp?.documents || [])
+      // Build map of label->owner
+      const map = new Map<string, string>()
+      for (let j = 0; j < docs.length; j++) {
+        const doc: any = docs[j]
+        const label = (doc.normalizedLabel || (doc.data && doc.data.normalizedLabel)) as string
+        const owner = doc.$ownerId || doc.ownerId
+        if (label && owner) map.set(label, owner)
+      }
+      // Resolve any entries for this parent
+      entries.forEach((entry, idx) => {
+        const { label, parent: p } = normalized[idx]
+        if (p === parent) {
+          entry.resolve(map.get(label) || null)
+        }
+      })
+    }
+  }
+})
+
 class DpnsService {
   private readonly CACHE_TTL = 3600000; // 1 hour cache for DPNS
 
@@ -39,66 +159,9 @@ class DpnsService {
    */
   async getAllUsernames(identityId: string): Promise<string[]> {
     try {
-      console.log(`DPNS: Fetching all usernames for identity: ${identityId}`);
-      
-      const sdk = await getWasmSdk();
-      
-      // Try the dedicated DPNS usernames function first
-      try {
-        const { get_dpns_usernames } = await import('../dash-wasm/wasm_sdk');
-        const response = await get_dpns_usernames(sdk, identityId, 20); // Get up to 20 usernames
-        
-        console.log('DPNS: Usernames response:', response);
-        
-        // Parse the response
-        let usernames: string[] = [];
-        
-        if (Array.isArray(response)) {
-          usernames = response.filter(u => typeof u === 'string' && u.length > 0);
-        } else if (response && typeof response === 'object' && response.usernames) {
-          usernames = response.usernames;
-        } else if (response && typeof response.toJSON === 'function') {
-          const jsonResponse = response.toJSON();
-          if (Array.isArray(jsonResponse)) {
-            usernames = jsonResponse.filter(u => typeof u === 'string' && u.length > 0);
-          } else if (jsonResponse && jsonResponse.usernames) {
-            usernames = jsonResponse.usernames;
-          }
-        }
-        
-        if (usernames.length > 0) {
-          console.log(`DPNS: Found ${usernames.length} usernames for identity ${identityId}`);
-          return usernames;
-        }
-      } catch (error) {
-        console.warn('DPNS: get_dpns_usernames failed, trying document query:', error);
-      }
-      
-      // Fallback: Query DPNS documents by identity ID
-      const response = await get_documents(
-        sdk,
-        DPNS_CONTRACT_ID,
-        DPNS_DOCUMENT_TYPE,
-        JSON.stringify([
-          ['records.identity', '==', identityId]
-        ]),
-        null,
-        20, // Get up to 20 usernames
-        null,
-        null
-      );
-      
-      if (response && response.documents && response.documents.length > 0) {
-        const usernames = response.documents.map((doc: DpnsDocument) => 
-          `${doc.label}.${doc.normalizedParentDomainName}`
-        );
-        
-        console.log(`DPNS: Found ${usernames.length} usernames for identity ${identityId} via document query`);
-        return usernames;
-      }
-      
-      console.log(`DPNS: No usernames found for identity ${identityId}`);
-      return [];
+      const usernames = await enqueueAllUsernames({ identityId })
+      console.log(`DPNS: Found ${usernames.length} usernames for identity ${identityId}`)
+      return usernames
     } catch (error) {
       console.error('DPNS: Error fetching all usernames:', error);
       return [];
@@ -127,26 +190,11 @@ class DpnsService {
    */
   async resolveUsername(identityId: string): Promise<string | null> {
     try {
-      const cacheName = 'dpns:reverse'
-      return await cacheManager.getOrFetch<string | null>(
-        cacheName,
-        identityId,
-        async () => {
-          console.log(`DPNS: Fetching username for identity: ${identityId}`);
-          const allUsernames = await this.getAllUsernames(identityId);
-          if (allUsernames.length === 0) {
-            console.log(`DPNS: No username found for identity ${identityId}`);
-            return null;
-          }
-          const sortedUsernames = this.sortUsernamesByContested(allUsernames);
-          const bestUsername = sortedUsernames[0];
-          return bestUsername;
-        },
-        { ttl: this.CACHE_TTL, tags: ['dpns'] }
-      )
+      const best = await enqueueBestUsernameByIdentity({ identityId })
+      return best
     } catch (error) {
-      console.error('DPNS: Error resolving username:', error);
-      return null;
+      console.error('DPNS: Error resolving username:', error)
+      return null
     }
   }
 
@@ -155,61 +203,11 @@ class DpnsService {
    */
   async resolveIdentity(username: string): Promise<string | null> {
     try {
-      const normalizedUsername = username.toLowerCase().replace('.dash', '');
-      const cacheName = 'dpns:forward'
-      return await cacheManager.getOrFetch<string | null>(
-        cacheName,
-        normalizedUsername,
-        async () => {
-          console.log(`DPNS: Resolving identity for username: ${normalizedUsername}`);
-          const sdk = await getWasmSdk();
-          // Try native resolution first
-          try {
-            const result = await dpns_resolve_name(sdk, normalizedUsername);
-            if (result && result.identity_id) {
-              console.log(`DPNS: Found identity ${result.identity_id} for username ${normalizedUsername} via native resolver`);
-              return result.identity_id;
-            }
-          } catch (error) {
-            console.warn('DPNS: Native resolver failed, trying document query:', error);
-          }
-          
-          // Fallback: Query DPNS documents
-          const parts = normalizedUsername.split('.');
-          const label = parts[0];
-          const parentDomain = parts.slice(1).join('.') || 'dash';
-          
-          const response = await get_documents(
-            sdk,
-            DPNS_CONTRACT_ID,
-            DPNS_DOCUMENT_TYPE,
-            JSON.stringify([
-              ['normalizedLabel', '==', label.toLowerCase()],
-              ['normalizedParentDomainName', '==', parentDomain.toLowerCase()]
-            ]),
-            null,
-            1,
-            null,
-            null
-          );
-          
-          if (response && response.documents && response.documents.length > 0) {
-            const dpnsDoc = response.documents[0] as DpnsDocument;
-            const identityId = dpnsDoc.records.identity || dpnsDoc.records.dashUniqueIdentityId || dpnsDoc.records.dashAliasIdentityId;
-            if (identityId) {
-              console.log(`DPNS: Found identity ${identityId} for username ${normalizedUsername} via document query`);
-              return identityId;
-            }
-          }
-          
-          console.log(`DPNS: No identity found for username ${normalizedUsername}`);
-          return null;
-        },
-        { ttl: this.CACHE_TTL, tags: ['dpns'] }
-      )
+      const normalized = username.toLowerCase().replace(/\.dash$/, '')
+      return await enqueueIdentityByUsername({ label: normalized, parent: 'dash' })
     } catch (error) {
-      console.error('DPNS: Error resolving identity:', error);
-      return null;
+      console.error('DPNS: Error resolving identity:', error)
+      return null
     }
   }
 
@@ -506,21 +504,7 @@ class DpnsService {
       cacheManager.clear('dpns:reverse')
     }
   }
-
-  /**
-   * Clean up expired cache entries
-   */
-  cleanupCache(): void {
-    // No-op; cacheManager handles cleanup globally
-  }
 }
 
 // Singleton instance
 export const dpnsService = new DpnsService();
-
-// Set up periodic cache cleanup
-if (typeof window !== 'undefined') {
-  setInterval(() => {
-    dpnsService.cleanupCache();
-  }, 3600000); // Clean up every hour
-}

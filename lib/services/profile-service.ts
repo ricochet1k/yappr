@@ -1,7 +1,7 @@
 import { BaseDocumentService, QueryOptions, DocumentResult } from './document-service';
 import { User } from '../types';
 import { dpnsService } from './dpns-service';
-import { cacheManager } from '../cache-manager';
+import { cacheManager, createBatcher, CacheManager } from '../cache-manager';
 
 export interface ProfileDocument {
   $id: string;
@@ -31,7 +31,6 @@ class ProfileService extends BaseDocumentService<User> {
   }
 
   private cachedUsername?: string;
-  private pendingUsernameHint: Map<string, string> = new Map();
 
   /**
    * Override query to handle cached username
@@ -184,35 +183,8 @@ class ProfileService extends BaseDocumentService<User> {
   async getProfile(ownerId: string, cachedUsername?: string): Promise<User | null> {
     try {
       console.log('ProfileService: Getting profile for owner ID (batched):', ownerId)
-      if (cachedUsername) {
-        this.pendingUsernameHint.set(ownerId, cachedUsername)
-      }
-
-      // Opportunistic batching for multiple concurrent getProfile calls
-      const user = await cacheManager.enqueueBatch<User | null>(
-        'profiles:getByOwner',
-        ownerId,
-        async (ownerIds: string[]) => {
-          const docs = await this.getProfilesByIdentityIds(ownerIds)
-          const map: Record<string, User | null> = {}
-          const byId = new Map(docs.map(d => [d.$ownerId || (d as any).ownerId, d]))
-          for (const id of ownerIds) {
-            const doc = byId.get(id)
-            if (doc) {
-              const hint = this.pendingUsernameHint.get(id)
-              const transformed = this.transformDocument(doc as any, { cachedUsername: hint })
-              map[id] = transformed
-            } else {
-              map[id] = null
-            }
-            this.pendingUsernameHint.delete(id)
-          }
-          return map
-        },
-        { delayMs: 25 }
-      )
-
-      return user
+      const doc = await enqueueProfileDoc(ownerId)
+      return doc ? this.transformDocument(doc as any, { cachedUsername }) : null
     } catch (error) {
       console.error('ProfileService: Error getting profile:', error)
       return null
@@ -495,41 +467,8 @@ class ProfileService extends BaseDocumentService<User> {
 
       console.log('ProfileService: Getting profiles for identity IDs:', identityIds);
 
-      // Use cache manager batch fetch to dedupe and persist
-      const cacheName = 'profiles:byOwner'
-      const fetchedMap = await cacheManager.getOrFetchBatch<ProfileDocument>(
-        cacheName,
-        identityIds,
-        async (missingIds: string[]) => {
-          const sdk = await getWasmSdk();
-          const where = [['$ownerId', 'in', missingIds]];
-          const orderBy = [['$ownerId', 'asc']];
-          const resp = await get_documents(
-            sdk,
-            this.contractId,
-            this.documentType,
-            JSON.stringify(where),
-            JSON.stringify(orderBy),
-            100,
-            null,
-            null
-          );
-          const map: Record<string, ProfileDocument> = {}
-          const docs = Array.isArray(resp) ? resp : (resp?.documents || [])
-          for (const doc of docs) {
-            const ownerId = (doc.$ownerId || doc.ownerId) as string
-            map[ownerId] = doc
-          }
-          return map
-        },
-        { ttl: 300000, tags: ['doctype:profile'] }
-      )
-
-      const results: ProfileDocument[] = []
-      for (const id of identityIds) {
-        if (fetchedMap[id]) results.push(fetchedMap[id])
-      }
-      return results
+      const docs = await Promise.all(identityIds.map(id => enqueueProfileDoc(id)))
+      return (docs.filter(Boolean) as ProfileDocument[])
     } catch (error) {
       console.error('ProfileService: Error getting profiles by identity IDs:', error);
       return [];
@@ -544,3 +483,37 @@ export const profileService = new ProfileService();
 import { getWasmSdk } from './wasm-sdk-service';
 import { get_document, get_documents } from '../dash-wasm/wasm_sdk';
 import { stateTransitionService } from './state-transition-service';
+
+// Module-level typed batcher for profile documents by owner ID
+const enqueueProfileDoc = createBatcher<string, ProfileDocument | null>({
+  cacheName: 'profiles:docByOwner',
+  delayMs: 25,
+  ttl: 300000,
+  tags: ['doctype:profile'],
+  handler: async (entries) => {
+    const sdk = await getWasmSdk()
+    const ownerIds = entries.map(e => e.original)
+    const where = [['$ownerId', 'in', ownerIds]]
+    const orderBy = [['$ownerId', 'asc']]
+    const resp = await get_documents(
+      sdk,
+      profileService['contractId'],
+      'profile',
+      JSON.stringify(where),
+      JSON.stringify(orderBy),
+      100,
+      null,
+      null
+    )
+    const docs = Array.isArray(resp) ? resp : (resp?.documents || [])
+    const byOwner = new Map<string, ProfileDocument>()
+    for (const d of docs) {
+      const owner = (d as any).$ownerId || (d as any).ownerId
+      if (owner) byOwner.set(owner, d)
+    }
+    for (const entry of entries) {
+      const doc = byOwner.get(entry.original) || null
+      entry.resolve(doc)
+    }
+  }
+})

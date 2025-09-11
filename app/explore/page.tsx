@@ -5,7 +5,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { MagnifyingGlassIcon, ArrowLeftIcon, EllipsisHorizontalIcon, ArrowTrendingUpIcon, HashtagIcon, FireIcon } from '@heroicons/react/24/outline'
 import { Sidebar } from '@/components/layout/sidebar'
 import { RightSidebar } from '@/components/layout/right-sidebar'
-import { PostCard } from '@/components/post/post-card'
+import { Post as PostItem } from '@/components/post/post'
+import { postService } from '@/lib/services'
 import { formatNumber } from '@/lib/utils'
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
@@ -30,31 +31,9 @@ export default function ExplorePage() {
     const loadTrendingPosts = async () => {
       try {
         setIsLoading(true)
-        const { getDashPlatformClient } = await import('@/lib/dash-platform-client')
-        const dashClient = getDashPlatformClient()
-        
         // Load recent posts (as trending)
-        const fetchedPosts = await dashClient.queryPosts({ 
-          limit: 20
-        })
-        
-        // Transform posts
-        const transformedPosts = fetchedPosts.map((post: any) => ({
-          id: post.$id,
-          content: post.content,
-          author: {
-            id: post.authorId,
-            username: post.authorId.slice(0, 8) + '...',
-            handle: post.authorId.slice(0, 8).toLowerCase()
-          },
-          timestamp: new Date(post.$createdAt).toISOString(),
-          likes: 0,
-          replies: 0,
-          reposts: 0,
-          views: 0
-        }))
-        
-        setPosts(transformedPosts)
+        const result = await postService.getTimeline({ limit: 20 })
+        setPosts(result.documents)
       } catch (error) {
         console.error('Failed to load posts:', error)
       } finally {
@@ -74,30 +53,13 @@ export default function ExplorePage() {
     
     const searchPosts = async () => {
       try {
-        const { getDashPlatformClient } = await import('@/lib/dash-platform-client')
-        const dashClient = getDashPlatformClient()
-        
         // Simple content search - in production you'd want full-text search
-        const allPosts = await dashClient.queryPosts({ limit: 100 })
-        
-        const filtered = allPosts.filter((post: any) => 
-          post.content.toLowerCase().includes(searchQuery.toLowerCase())
-        ).map((post: any) => ({
-          id: post.$id,
-          content: post.content,
-          author: {
-            id: post.authorId,
-            username: post.authorId.slice(0, 8) + '...',
-            handle: post.authorId.slice(0, 8).toLowerCase()
-          },
-          timestamp: new Date(post.$createdAt).toISOString(),
-          likes: 0,
-          replies: 0,
-          reposts: 0,
-          views: 0
-        }))
-        
-        setSearchResults(filtered)
+        const result = await postService.getTimeline({ limit: 100 })
+        const filteredDocs = result.documents.filter((p: any) => {
+          const content = (p.content || '') as string
+          return content.toLowerCase().includes(searchQuery.toLowerCase())
+        })
+        setSearchResults(filteredDocs)
       } catch (error) {
         console.error('Search failed:', error)
       }
@@ -294,7 +256,7 @@ export default function ExplorePage() {
 
                 <Tabs.Content value="top">
                   {displayPosts.length > 0 ? (
-                    displayPosts.map((post) => <PostCard key={post.id} post={post} />)
+                    displayPosts.map((p: any) => <PostItem key={p.id} post={p} />)
                   ) : (
                     <div className="p-8 text-center">
                       <p className="text-gray-500">No results for &quot;{searchQuery}&quot;</p>
@@ -375,8 +337,8 @@ export default function ExplorePage() {
                     <p className="text-gray-500">Loading posts...</p>
                   </div>
                 ) : (
-                  posts.slice(0, 3).map((post) => (
-                    <PostCard key={post.id} post={post} />
+                  posts.slice(0, 3).map((p: any) => (
+                    <PostItem key={p.id} post={p} />
                   ))
                 )}
               </div>

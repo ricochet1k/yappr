@@ -9,7 +9,6 @@ import { withAuth, useAuth } from '@/contexts/auth-context'
 import { LoadingState, useAsyncState } from '@/components/ui/loading-state'
 import ErrorBoundary from '@/components/error-boundary'
 import { followService, dpnsService, profileService } from '@/lib/services'
-import { cacheManager } from '@/lib/cache-manager'
 import { AvatarCanvas } from '@/components/ui/avatar-canvas'
 import { generateAvatarV2 } from '@/lib/avatar-generator-v2'
 import { Button } from '@/components/ui/button'
@@ -60,10 +59,6 @@ function FollowingPage() {
         setLoading(false)
         return
       }
-
-      const cacheKey = `following_${user.identityId}`
-      
-      // Use cache to dedupe and persist results
 
       // Use followService to get following list
       const follows = await followService.getFollowing(user.identityId, { limit: 50 })
@@ -124,10 +119,11 @@ function FollowingPage() {
         const allUsernames = allUsernamesMap.get(followingId) || []
         const profile = profileMap.get(followingId)
         
+        const shortId = `${followingId.slice(0, 6)}…`
         return {
           id: followingId,
-          username: username || `user_${followingId.slice(-6)}`,
-          displayName: profile?.displayName || username || `User ${followingId.slice(-6)}`,
+          username: username || shortId,
+          displayName: profile?.displayName || username || shortId,
           bio: profile?.bio || (profile ? 'Yappr user' : 'Not yet on Yappr'),
           hasProfile: !!profile,
           followersCount: 0, // Would need to query this
@@ -136,9 +132,6 @@ function FollowingPage() {
           allUsernames: allUsernames
         }
       }).filter(Boolean)) as FollowingUser[] // Remove any null entries
-
-      // Cache the results
-      await cacheManager.getOrFetch('following', cacheKey, async () => followingUsers, { ttl: 60000, tags: ['following'] })
       
       setData(followingUsers)
       console.log(`Following: Successfully loaded ${followingUsers.length} following`)

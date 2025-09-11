@@ -59,32 +59,9 @@ function ProfilePage() {
     const loadUserPosts = async () => {
       try {
         setIsLoadingPosts(true)
-        const { getDashPlatformClient } = await import('@/lib/dash-platform-client')
-        const dashClient = getDashPlatformClient()
-        
-        // Query posts by author
-        const posts = await dashClient.queryPosts({ 
-          authorId: user.identityId,
-          limit: 50 
-        })
-        
-        // Transform posts to match our UI format
-        const transformedPosts = posts.map((post: any) => ({
-          id: post.$id,
-          content: post.content,
-          author: {
-            id: post.authorId,
-            username: user.identityId.slice(0, 8) + '...',
-            handle: user.identityId.slice(0, 8).toLowerCase()
-          },
-          timestamp: new Date(post.$createdAt).toISOString(),
-          likes: 0,
-          replies: 0,
-          reposts: 0,
-          views: 0
-        }))
-        
-        setUserPosts(transformedPosts)
+        const { postService } = await import('@/lib/services')
+        const result = await postService.getUserPosts(user.identityId, { limit: 50 })
+        setUserPosts(result.documents)
       } catch (error) {
         console.error('Failed to load user posts:', error)
       } finally {

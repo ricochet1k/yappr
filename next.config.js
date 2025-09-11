@@ -1,5 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Enable production source maps for better coverage attribution when requested
+  productionBrowserSourceMaps: process.env.E2E_COVERAGE === '1',
   reactStrictMode: true,
   images: {
     domains: ['images.unsplash.com', 'api.dicebear.com'],
@@ -23,6 +25,19 @@ const nextConfig = {
       }
     }
     
+    // Instrument client code for coverage during E2E when requested
+    if (!isServer && process.env.E2E_COVERAGE === '1') {
+      config.module.rules.push({
+        test: /\.(ts|tsx|js|jsx)$/,
+        exclude: /node_modules|\.test\.|e2e\/|lib\/dash-wasm\/|public\/dash-wasm\//,
+        use: {
+          loader: 'istanbul-instrumenter-loader',
+          options: { esModules: true },
+        },
+        enforce: 'post',
+      })
+    }
+
     // Handle WASM files
     config.experiments = {
       ...config.experiments,

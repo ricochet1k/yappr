@@ -20,7 +20,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { dpns_convert_to_homograph_safe } from '@/lib/dash-wasm/wasm_sdk'
+import { dpns_convert_to_homograph_safe } from '@/lib/wasm-sdk/wasm_sdk'
 import { AlsoKnownAs } from '@/components/ui/also-known-as'
 
 interface FollowingUser {

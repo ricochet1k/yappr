@@ -46,75 +46,75 @@ echo ""
 
 # Create necessary directories
 echo -e "${GREEN}Creating directories...${NC}"
-mkdir -p "${SCRIPT_DIR}/public/dash-wasm"
+# mkdir -p "${SCRIPT_DIR}/public/dash-wasm"
 mkdir -p "${SCRIPT_DIR}/lib/wasm-sdk"
 
-# Copy files to public/dash-wasm (for browser access)
-echo -e "${GREEN}Copying wasm-sdk files to public/dash-wasm...${NC}"
-cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk_bg.wasm" "${SCRIPT_DIR}/public/dash-wasm/"
-cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk.js" "${SCRIPT_DIR}/public/dash-wasm/"
-cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk_bg.wasm.d.ts" "${SCRIPT_DIR}/public/dash-wasm/"
-cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk.d.ts" "${SCRIPT_DIR}/public/dash-wasm/"
-cp -f "${WASM_SDK_SOURCE}/pkg/package.json" "${SCRIPT_DIR}/public/dash-wasm/"
+# # Copy files to public/dash-wasm (for browser access)
+# echo -e "${GREEN}Copying wasm-sdk files to public/dash-wasm...${NC}"
+# cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk_bg.wasm" "${SCRIPT_DIR}/public/dash-wasm/"
+# cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk.js" "${SCRIPT_DIR}/public/dash-wasm/"
+# cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk_bg.wasm.d.ts" "${SCRIPT_DIR}/public/dash-wasm/"
+# cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk.d.ts" "${SCRIPT_DIR}/public/dash-wasm/"
+# cp -f "${WASM_SDK_SOURCE}/pkg/package.json" "${SCRIPT_DIR}/public/dash-wasm/"
 
-# Check for optimized wasm file
-if [ -f "${WASM_SDK_SOURCE}/pkg/optimized.wasm" ]; then
-    echo -e "${GREEN}Copying optimized.wasm...${NC}"
-    cp -f "${WASM_SDK_SOURCE}/pkg/optimized.wasm" "${SCRIPT_DIR}/public/dash-wasm/"
-fi
+# # Check for optimized wasm file
+# if [ -f "${WASM_SDK_SOURCE}/pkg/optimized.wasm" ]; then
+#     echo -e "${GREEN}Copying optimized.wasm...${NC}"
+#     cp -f "${WASM_SDK_SOURCE}/pkg/optimized.wasm" "${SCRIPT_DIR}/public/dash-wasm/"
+# fi
 
-# Copy README if it exists
-if [ -f "${WASM_SDK_SOURCE}/pkg/README.md" ]; then
-    cp -f "${WASM_SDK_SOURCE}/pkg/README.md" "${SCRIPT_DIR}/public/dash-wasm/"
-fi
+# # Copy README if it exists
+# if [ -f "${WASM_SDK_SOURCE}/pkg/README.md" ]; then
+#     cp -f "${WASM_SDK_SOURCE}/pkg/README.md" "${SCRIPT_DIR}/public/dash-wasm/"
+# fi
 
 # Copy necessary files to lib/wasm-sdk (for potential Node.js/build usage)
 echo -e "${GREEN}Setting up lib/wasm-sdk directory...${NC}"
 
 # Create a minimal package.json for the lib/wasm-sdk directory
-cat > "${SCRIPT_DIR}/lib/wasm-sdk/package.json" << 'EOF'
-{
-  "name": "wasm-sdk",
-  "version": "1.0.0",
-  "description": "Dash Platform WASM SDK",
-  "main": "wasm_sdk.js",
-  "type": "module"
-}
-EOF
+# cat > "${SCRIPT_DIR}/lib/wasm-sdk/package.json" << 'EOF'
+# {
+#   "name": "wasm-sdk",
+#   "version": "1.0.0",
+#   "description": "Dash Platform WASM SDK",
+#   "main": "wasm_sdk.js",
+#   "type": "module"
+# }
+# EOF
+
+# Remove old files
+rm -f "${SCRIPT_DIR}/lib/wasm-sdk/*"
 
 # Copy the built files
-cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk.js" "${SCRIPT_DIR}/lib/wasm-sdk/"
-cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk_bg.wasm" "${SCRIPT_DIR}/lib/wasm-sdk/"
-cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk.d.ts" "${SCRIPT_DIR}/lib/wasm-sdk/"
-cp -f "${WASM_SDK_SOURCE}/pkg/wasm_sdk_bg.wasm.d.ts" "${SCRIPT_DIR}/lib/wasm-sdk/"
+cp -f "${WASM_SDK_SOURCE}/pkg/"* "${SCRIPT_DIR}/lib/wasm-sdk/"
 
 # Create a .gitignore in lib/wasm-sdk to ignore large files
-cat > "${SCRIPT_DIR}/lib/wasm-sdk/.gitignore" << 'EOF'
-# Ignore build artifacts and large files
-target/
-node_modules/
-pkg/
-*.log
-packages/
+# cat > "${SCRIPT_DIR}/lib/wasm-sdk/.gitignore" << 'EOF'
+# # Ignore build artifacts and large files
+# target/
+# node_modules/
+# pkg/
+# *.log
+# packages/
 
-# Keep only the essential built files
-!wasm_sdk.js
-!wasm_sdk_bg.wasm
-!wasm_sdk.d.ts
-!wasm_sdk_bg.wasm.d.ts
-!package.json
-!.gitignore
-EOF
+# # Keep only the essential built files
+# !wasm_sdk.js
+# !wasm_sdk_bg.wasm
+# !wasm_sdk.d.ts
+# !wasm_sdk_bg.wasm.d.ts
+# !package.json
+# !.gitignore
+# EOF
 
 # Summary
 echo ""
 echo -e "${GREEN}✅ Sync completed successfully!${NC}"
 echo ""
 echo "Files copied to:"
-echo "  - public/dash-wasm/ (for browser access)"
+# echo "  - public/dash-wasm/ (for browser access)"
 echo "  - lib/wasm-sdk/ (for build tools)"
 echo ""
-echo -e "${YELLOW}Note: The wasm files in public/dash-wasm/ are already tracked by git.${NC}"
-echo -e "${YELLOW}      The lib/wasm-sdk/ files are gitignored due to size.${NC}"
+# echo -e "${YELLOW}Note: The wasm files in public/dash-wasm/ are already tracked by git.${NC}"
+# echo -e "${YELLOW}      The lib/wasm-sdk/ files are gitignored due to size.${NC}"
 echo ""
 echo "To update in the future, run: ./sync-wasm-sdk.sh [platform_directory]"

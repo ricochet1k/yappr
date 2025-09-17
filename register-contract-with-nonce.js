@@ -1,4 +1,4 @@
-const { WasmSdkBuilder, prefetch_trusted_quorums_testnet, get_identity_nonce } = require('./lib/dash-wasm/wasm_sdk');
+const { WasmSdkBuilder, prefetch_trusted_quorums_testnet, get_identity_nonce } = require('./lib/wasm-sdk/wasm_sdk');
 const fs = require('fs');
 
 async function registerContract() {
@@ -6,9 +6,9 @@ async function registerContract() {
     console.log('Initializing WASM SDK...');
     
     // Initialize WASM module
-    const wasmPath = './lib/dash-wasm/wasm_sdk_bg.wasm';
+    const wasmPath = './lib/wasm-sdk/wasm_sdk_bg.wasm';
     const wasmBytes = fs.readFileSync(wasmPath);
-    const { default: init } = require('./lib/dash-wasm/wasm_sdk');
+    const { default: init } = require('./lib/wasm-sdk/wasm_sdk');
     await init(wasmBytes);
     
     // Prefetch trusted quorums and build SDK

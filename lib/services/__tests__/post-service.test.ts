@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../../dash-wasm/wasm_sdk', () => {
+vi.mock('../../wasm-sdk/wasm_sdk', () => {
   return {
     get_documents: vi.fn(async (_sdk, _contractId, docType: string, where: any, orderBy: any, limit?: number) => {
       // Like counts path
@@ -25,8 +25,8 @@ vi.mock('../../dash-wasm/wasm_sdk', () => {
         }
         return { documents: docs.slice(0, limit || docs.length) }
       }
-      // If counting replies (where contains replyToId), return 1 doc
-      if (docType === 'post' && typeof where === 'string' && where.includes('replyToId')) {
+      // If counting replies (where contains replyToPostId), return 1 doc
+      if (docType === 'post' && typeof where === 'string' && where.includes('replyToPostId')) {
         return { documents: [{ $id: 'r1', $ownerId: 'uX', $createdAt: 1, content: 'reply' }] }
       }
       // Default timeline documents

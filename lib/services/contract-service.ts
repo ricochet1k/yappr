@@ -2,7 +2,7 @@
  * Service for managing local data contracts
  */
 
-import yapprContractJson from '../../contracts/yappr-minimal.json'
+import yapprContractJson from '../../contracts/yappr-social-contract.json'
 
 export interface DataContract {
   $id?: string
@@ -22,12 +22,15 @@ class ContractService {
    */
   getYapprContract(ownerId: string, contractId: string): DataContract {
     if (!this.yapprContract || this.contractId !== contractId) {
-      // Create a copy and set the owner ID and contract ID
-      this.yapprContract = {
-        ...yapprContractJson,
+      // Normalize contract shape and set owner/contract IDs
+      const base: any = yapprContractJson as any
+      const documents = base.documents ?? base
+      this.yapprContract = ({
+        ...base,
+        documents,
         ownerId,
         $id: contractId
-      }
+      } as unknown) as DataContract
       this.contractId = contractId
     }
     

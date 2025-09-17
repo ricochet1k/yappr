@@ -1,0 +1,14 @@
+# Ignore build artifacts and large files
+target/
+node_modules/
+pkg/
+*.log
+packages/
+
+# Keep only the essential built files
+!wasm_sdk.js
+!wasm_sdk_bg.wasm
+!wasm_sdk.d.ts
+!wasm_sdk_bg.wasm.d.ts
+!package.json
+!.gitignore

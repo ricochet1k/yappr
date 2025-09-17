@@ -1,7 +1,6 @@
 import { getWasmSdk } from './wasm-sdk-service';
-import { wait_for_state_transition_result } from '../dash-wasm/wasm_sdk';
+import { wait_for_state_transition_result } from '../wasm-sdk/wasm_sdk';
 import { keyManager } from '../key-manager';
-import type { WasmSdk } from '../dash-wasm/wasm_sdk';
 
 export interface StateTransitionResult {
   success: boolean;
@@ -11,6 +10,7 @@ export interface StateTransitionResult {
 }
 
 class StateTransitionService {
+  private static readonly CREDITS_PER_DASH = 100_000_000_000; // 1 DASH = 100B credits
   /**
    * Get the private key from secure storage
    */
@@ -51,7 +51,6 @@ class StateTransitionService {
     documentData: any
   ): Promise<StateTransitionResult> {
     try {
-      const sdk = await getWasmSdk();
       const privateKey = await this.getPrivateKey(ownerId);
       const entropy = this.generateEntropy();
       
@@ -59,15 +58,40 @@ class StateTransitionService {
       console.log(`Contract ID: ${contractId}`);
       console.log(`Owner ID: ${ownerId}`);
       
-      // Create the document using the SDK method
-      const result = await sdk.documentCreate(
+      // Create the document using safe wrapper
+      // Measure balance before
+      const { identityService } = await import('./identity-service')
+      let before = await identityService.getBalance(ownerId)
+      const { safeDocumentCreate } = await import('./dapi-helpers')
+      const result = await safeDocumentCreate(
         contractId,
         documentType,
         ownerId,
         JSON.stringify(documentData),
         entropy,
         privateKey
-      );
+      )
+
+      // Force refresh identity balance and compute delta
+      try {
+        identityService.clearCache(ownerId)
+        const after = await identityService.getBalance(ownerId)
+        const delta = before ? (before.total - after.total) : 0
+        // Notify cost (credits)
+        if (typeof window !== 'undefined') {
+          const toast = (await import('react-hot-toast')).default
+          const action = 'Created'
+          if (delta > 0) {
+            const dash = delta / StateTransitionService.CREDITS_PER_DASH
+            const dashStr = dash.toFixed(8).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1')
+            toast.success(`${action} ${documentType}. Cost: ${delta} credits (≈ ${dashStr} DASH)`) 
+          } else {
+            toast.success(`${action} ${documentType}. Cost: <unavailable> (credits)`) 
+          }
+        }
+      } catch (e) {
+        // Non-fatal: skip notification on error
+      }
       
       console.log('Document creation result:', result);
       
@@ -98,13 +122,16 @@ class StateTransitionService {
     revision: number
   ): Promise<StateTransitionResult> {
     try {
-      const sdk = await getWasmSdk();
       const privateKey = await this.getPrivateKey(ownerId);
       
       console.log(`Updating ${documentType} document ${documentId}...`);
       
-      // Update the document using the SDK method
-      const result = await sdk.documentReplace(
+      // Update the document using safe wrapper
+      // Measure balance before
+      const { identityService } = await import('./identity-service')
+      let before = await identityService.getBalance(ownerId)
+      const { safeDocumentReplace } = await import('./dapi-helpers')
+      const result = await safeDocumentReplace(
         contractId,
         documentType,
         documentId,
@@ -112,8 +139,25 @@ class StateTransitionService {
         JSON.stringify(documentData),
         BigInt(revision),
         privateKey,
-        0 // key_id - using 0 as default (matches index.html)
-      );
+      )
+
+      // Force refresh balance and notify
+      try {
+        identityService.clearCache(ownerId)
+        const after = await identityService.getBalance(ownerId)
+        const delta = before ? (before.total - after.total) : 0
+        if (typeof window !== 'undefined') {
+          const toast = (await import('react-hot-toast')).default
+          const action = 'Updated'
+          if (delta > 0) {
+            const dash = delta / StateTransitionService.CREDITS_PER_DASH
+            const dashStr = dash.toFixed(8).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1')
+            toast.success(`${action} ${documentType}. Cost: ${delta} credits (≈ ${dashStr} DASH)`) 
+          } else {
+            toast.success(`${action} ${documentType}. Cost: <unavailable> (credits)`) 
+          }
+        }
+      } catch {}
       
       return {
         success: true,
@@ -139,20 +183,40 @@ class StateTransitionService {
     ownerId: string
   ): Promise<StateTransitionResult> {
     try {
-      const sdk = await getWasmSdk();
       const privateKey = await this.getPrivateKey(ownerId);
       
       console.log(`Deleting ${documentType} document ${documentId}...`);
       
-      // Delete the document using the SDK method
-      const result = await sdk.documentDelete(
+      // Delete the document using safe wrapper
+      // Measure balance before
+      const { identityService } = await import('./identity-service')
+      let before = await identityService.getBalance(ownerId)
+      const { safeDocumentDelete } = await import('./dapi-helpers')
+      const result = await safeDocumentDelete(
         contractId,
         documentType,
         documentId,
         ownerId,
         privateKey,
-        0 // key_id - using 0 as default
-      );
+      )
+
+      // Force refresh and notify
+      try {
+        identityService.clearCache(ownerId)
+        const after = await identityService.getBalance(ownerId)
+        const delta = before ? (before.total - after.total) : 0
+        if (typeof window !== 'undefined') {
+          const toast = (await import('react-hot-toast')).default
+          const action = 'Deleted'
+          if (delta > 0) {
+            const dash = delta / StateTransitionService.CREDITS_PER_DASH
+            const dashStr = dash.toFixed(8).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1')
+            toast.success(`${action} ${documentType}. Cost: ${delta} credits (≈ ${dashStr} DASH)`) 
+          } else {
+            toast.success(`${action} ${documentType}. Cost: <unavailable> (credits)`) 
+          }
+        }
+      } catch {}
       
       return {
         success: true,

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../../dash-wasm/wasm_sdk', () => {
+vi.mock('../../wasm-sdk/wasm_sdk', () => {
   return {
     get_documents: vi.fn(async (_sdk, _contractId, docType: string, where: any) => {
       if (docType !== 'like') return { documents: [] }

@@ -1,12 +1,10 @@
 import { 
-  get_documents,
   dpns_convert_to_homograph_safe,
   dpns_is_valid_username,
   dpns_is_contested_username,
   dpns_register_name,
-  dpns_is_name_available,
-  dpns_resolve_name 
-} from '../dash-wasm/wasm_sdk';
+  dpns_is_name_available
+} from '../wasm-sdk/wasm_sdk';
 import { DPNS_CONTRACT_ID, DPNS_DOCUMENT_TYPE } from '../constants';
 import { cacheManager, createBatcher, CacheManager } from '../cache-manager';
 import { getWasmSdk } from './wasm-sdk-service';
@@ -38,16 +36,16 @@ const enqueueAllUsernames = createBatcher<{ identityId: string }, string[]>({
   ttl: 3600000,
   tags: ['dpns'],
   handler: async (entries) => {
-    const ids = entries.map(e => e.original.identityId)
-    const sdk = await getWasmSdk()
-    const where = [['records.identity', 'in', ids]]
-    const resp = await get_documents(
-      sdk,
+    const { safeGetDocuments } = await import('./dapi-helpers')
+    const ids = entries.map(e => e.original.identityId).filter(Boolean)
+    if (!ids.length) return;
+    
+    const resp = await safeGetDocuments(
       DPNS_CONTRACT_ID,
       DPNS_DOCUMENT_TYPE,
-      JSON.stringify(where),
-      null,
-      200,
+      [['records.identity', 'in', ids]],
+      [['records.identity', 'asc']],
+      100,
       null,
       null
     )
@@ -117,17 +115,16 @@ const enqueueIdentityByUsername = createBatcher<{ label: string; parent?: string
     for (let i = 0; i < parentKeys.length; i++) {
       const parent = parentKeys[i]
       const labels = Array.from(byParent.get(parent)!)
-      const where = [
-        ['normalizedLabel', 'in', labels],
-        ['normalizedParentDomainName', '==', parent]
-      ]
-      const resp = await get_documents(
-        sdk,
+      const { safeGetDocuments } = await import('./dapi-helpers')
+      const resp = await safeGetDocuments(
         DPNS_CONTRACT_ID,
         DPNS_DOCUMENT_TYPE,
-        JSON.stringify(where),
+        [
+          ['normalizedLabel', 'in', labels],
+          ['normalizedParentDomainName', '==', parent]
+        ],
         null,
-        200,
+        100,
         null,
         null
       )
@@ -245,27 +242,21 @@ class DpnsService {
    */
   async searchUsernamesWithDetails(prefix: string, limit: number = 10): Promise<Array<{ username: string; ownerId: string }>> {
     try {
-      const sdk = await getWasmSdk();
-      
       // Remove .dash suffix if present for search
       const searchPrefix = prefix.toLowerCase().replace(/\.dash$/, '');
       
       // Search DPNS names by prefix
       console.log(`DPNS: Searching usernames with prefix: ${searchPrefix}`);
       
-      // Build where clause for starts-with query on normalizedLabel
-      const where = [
-        ['normalizedLabel', 'startsWith', searchPrefix],
-        ['normalizedParentDomainName', '==', 'dash']
-      ];
-      const orderBy = [['normalizedLabel', 'asc']];
-      
-      const documents = await get_documents(
-        sdk,
+      const { safeGetDocuments } = await import('./dapi-helpers')
+      const documents = await safeGetDocuments(
         DPNS_CONTRACT_ID,
         DPNS_DOCUMENT_TYPE,
-        JSON.stringify(where),
-        JSON.stringify(orderBy),
+        [
+          ['normalizedLabel', 'startsWith', searchPrefix],
+          ['normalizedParentDomainName', '==', 'dash']
+        ],
+        [['normalizedLabel', 'asc']],
         limit,
         null,
         null
@@ -304,8 +295,6 @@ class DpnsService {
    */
   async searchUsernames(prefix: string, limit: number = 10): Promise<string[]> {
     try {
-      const sdk = await getWasmSdk();
-      
       // Remove .dash suffix if present for search
       const searchPrefix = prefix.toLowerCase().replace(/\.dash$/, '');
       
@@ -318,18 +307,18 @@ class DpnsService {
       const where = [
         ['normalizedLabel', 'startsWith', searchPrefix],
         ['normalizedParentDomainName', '==', 'dash']
-      ];
-      const orderBy = [['normalizedLabel', 'asc']];
+      ] as Array<[string, string, unknown]>;
+      const orderBy = [['normalizedLabel', 'asc']] as Array<[string, 'asc' | 'desc']>;
       
       console.log('DPNS: Query where clause:', JSON.stringify(where));
       console.log('DPNS: Query orderBy:', JSON.stringify(orderBy));
       
-      const documents = await get_documents(
-        sdk,
+      const { safeGetDocuments } = await import('./dapi-helpers')
+      const documents = await safeGetDocuments(
         DPNS_CONTRACT_ID,
         DPNS_DOCUMENT_TYPE,
-        JSON.stringify(where),
-        JSON.stringify(orderBy),
+        where,
+        orderBy,
         limit,
         null,
         null
@@ -393,9 +382,29 @@ class DpnsService {
         console.warn(`Username ${label} is contested and will require masternode voting`);
       }
 
-      // Check availability
+      // Check availability with a retry on DAPI address exhaustion
       const sdk = await getWasmSdk();
-      const isAvailable = await dpns_is_name_available(sdk, label);
+      let isAvailable: boolean | null = null
+      try {
+        isAvailable = await dpns_is_name_available(sdk, label);
+      } catch (e: any) {
+        const msg = (e && (e.message || String(e))) || ''
+        if (msg.includes('no available addresses')) {
+          console.warn('DPNS: No available DAPI addresses; reinitializing SDK and retrying once...')
+          try {
+            const { wasmSdkService } = await import('./wasm-sdk-service')
+            const cfg = wasmSdkService.getConfig()
+            if (cfg) await wasmSdkService.reinitialize(cfg)
+            const sdk2 = await getWasmSdk()
+            isAvailable = await dpns_is_name_available(sdk2, label)
+          } catch (inner) {
+            // If retry fails, surface a friendlier error
+            throw new Error('Dash Platform temporarily unavailable (no DAPI addresses). Please try again shortly.')
+          }
+        } else {
+          throw e
+        }
+      }
       if (!isAvailable) {
         throw new Error(`Username ${label} is already taken`);
       }
@@ -407,16 +416,47 @@ class DpnsService {
         throw new Error('Private key not available. Please log in again.');
       }
 
-      // Register the name
+      // Register the name (DAPI can return flaky Internal errors even on success)
       console.log(`Registering DPNS name: ${label}`);
-      const result = await dpns_register_name(
-        sdk,
-        label,
-        identityId,
-        publicKeyId,
-        privateKeyWif,
-        onPreorderSuccess || null
-      );
+      let result: any
+      try {
+        result = await dpns_register_name(
+          sdk,
+          label,
+          identityId,
+          publicKeyId,
+          privateKeyWif,
+          onPreorderSuccess || null
+        );
+      } catch (e: any) {
+        const msg = (e && (e.message || String(e))) || ''
+        // Known intermittent error from DAPI: treat as potentially successful and verify
+        if (msg.includes('Missing response message') || msg.includes('transport error') || msg.includes('Internal')) {
+          console.warn('DPNS: Registration returned transient error, verifying outcome...')
+          try {
+            // If the name is now unavailable, assume registration succeeded
+            const stillAvailable = await dpns_is_name_available(sdk, label)
+            if (stillAvailable === false) {
+              console.log('DPNS: Name is no longer available; assuming registration succeeded')
+              result = { assumed: true }
+            } else {
+              // Try resolve identity by username and compare owner
+              const resolvedOwner = await this.resolveIdentity(label)
+              if (resolvedOwner && resolvedOwner === identityId) {
+                console.log('DPNS: Username resolves to our identity; assuming registration succeeded')
+                result = { assumed: true }
+              } else {
+                throw e
+              }
+            }
+          } catch (verifyErr) {
+            // Could not verify success; surface clearer message
+            throw new Error('Failed to register DPNS name due to a transient network issue. Please try again, or click "I just registered my username" after a minute.')
+          }
+        } else {
+          throw e
+        }
+      }
 
       // Clear cache for this identity
       this.clearCache(undefined, identityId);

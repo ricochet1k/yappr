@@ -58,6 +58,8 @@ export function ComposeModal() {
       if (result.success) {
         toast.success('Post created successfully!')
         
+        const parentId = replyingTo?.id
+
         // Clear the form and close modal
         setContent('')
         setComposeOpen(false)
@@ -67,6 +69,15 @@ export function ComposeModal() {
         window.dispatchEvent(new CustomEvent('post-created', { 
           detail: { post: result.data } 
         }))
+
+        // If this was a reply, invalidate parent stats and notify listeners
+        if (parentId) {
+          try {
+            const { cacheManager } = await import('@/lib/cache-manager')
+            cacheManager.delete('post:stats', parentId)
+            window.dispatchEvent(new CustomEvent('post-updated', { detail: { postId: parentId } }))
+          } catch {}
+        }
       } else {
         throw result.error || new Error('Post creation failed')
       }

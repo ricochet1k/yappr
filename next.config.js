@@ -4,32 +4,35 @@ const nextConfig = {
   productionBrowserSourceMaps: process.env.E2E_COVERAGE === '1',
   reactStrictMode: true,
   images: {
-    domains: ['images.unsplash.com', 'api.dicebear.com'],
+    remotePatterns: [
+      {hostname: 'images.unsplash.com'}, 
+      {hostname: 'api.dicebear.com'},
+    ],
   },
-  webpack: (config, { isServer }) => {
-    // Optimize Dash SDK bundle size
-    if (!isServer) {
-      config.optimization = {
-        ...config.optimization,
-        splitChunks: {
-          chunks: 'all',
-          cacheGroups: {
-            dash: {
-              test: /[\\/]node_modules[\\/]dash[\\/]/,
-              name: 'dash-sdk',
-              priority: 10,
-              reuseExistingChunk: true,
-            },
-          },
-        },
-      }
-    }
+  webpack: (config, { isServer, dev }) => {
+  //   // Optimize Dash SDK bundle size
+  //   if (!isServer) {
+  //     config.optimization = {
+  //       ...config.optimization,
+  //       splitChunks: {
+  //         chunks: 'all',
+  //         cacheGroups: {
+  //           dash: {
+  //             test: /[\\/]node_modules[\\/]dash[\\/]/,
+  //             name: 'dash-sdk',
+  //             priority: 10,
+  //             reuseExistingChunk: true,
+  //           },
+  //         },
+  //       },
+  //     }
+  //   }
     
     // Instrument client code for coverage during E2E when requested
     if (!isServer && process.env.E2E_COVERAGE === '1') {
       config.module.rules.push({
         test: /\.(ts|tsx|js|jsx)$/,
-        exclude: /node_modules|\.test\.|e2e\/|lib\/dash-wasm\/|public\/dash-wasm\//,
+        exclude: /node_modules|\.test\.|e2e\/|lib\/wasm-sdk\//,
         use: {
           loader: 'istanbul-instrumenter-loader',
           options: { esModules: true },
@@ -43,6 +46,17 @@ const nextConfig = {
       ...config.experiments,
       asyncWebAssembly: true,
     }
+    // Use the client static directory in the server bundle and prod mode
+    // Fixes `Error occurred prerendering page "/"`
+    // config.output.webassemblyModuleFilename =
+    //   isServer && !dev
+    //     ? '../static/pkg/[modulehash].wasm'
+    //     : 'static/pkg/[modulehash].wasm'
+    // TODO: This is bad, it won't allow multiple wasm bundles but there seems to be a bug where the file is output with a different hash than it is imported with.
+    config.output.webassemblyModuleFilename =
+      isServer && !dev
+        ? '../static/pkg/TODO_webassemblyModuleFilename_IS_BROKEN.wasm'
+        : 'static/pkg/TODO_webassemblyModuleFilename_IS_BROKEN.wasm'
     
     return config
   },

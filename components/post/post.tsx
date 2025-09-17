@@ -73,6 +73,11 @@ export function Post({ doc, post: preTransformed, hideAvatar = false, currentUse
   const isOwnPost = currentUserId ? currentUserId === finalPost.author.id : false
 
   return (
-    <PostCard post={finalPost} hideAvatar={hideAvatar} isOwnPost={isOwnPost} />
+    <PostCard 
+      post={finalPost} 
+      hideAvatar={hideAvatar} 
+      isOwnPost={isOwnPost} 
+      currentUserId={currentUserId}
+    />
   )
 }

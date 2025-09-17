@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Image from 'next/image'
 import { motion } from 'framer-motion'
 import { 
@@ -30,9 +30,10 @@ interface PostCardProps {
   post: Post
   hideAvatar?: boolean
   isOwnPost?: boolean
+  currentUserId?: string | null
 }
 
-export function PostCard({ post, hideAvatar = false, isOwnPost = false }: PostCardProps) {
+export function PostCard({ post, hideAvatar = false, isOwnPost = false, currentUserId = null }: PostCardProps) {
   const [liked, setLiked] = useState(post.liked || false)
   const [likes, setLikes] = useState(post.likes)
   const [reposted, setReposted] = useState(post.reposted || false)
@@ -40,6 +41,50 @@ export function PostCard({ post, hideAvatar = false, isOwnPost = false }: PostCa
   const [bookmarked, setBookmarked] = useState(post.bookmarked || false)
   const [showLikesModal, setShowLikesModal] = useState(false)
   const { setReplyingTo, setComposeOpen } = useAppStore()
+  
+  // Services loaded lazily to avoid SSR pitfalls
+  async function persistLike(nextLiked: boolean) {
+    const [{ likeService }, { cacheManager }] = await Promise.all([
+      import('@/lib/services/like-service'),
+      import('@/lib/cache-manager'),
+    ])
+    try {
+      if (!currentUserId) throw new Error('Please log in to like posts')
+      const ok = nextLiked
+        ? await likeService.likePost(post.id, currentUserId)
+        : await likeService.unlikePost(post.id, currentUserId)
+      if (!ok) throw new Error('Failed to persist like')
+      // Invalidate stats for this post so future queries refresh
+      cacheManager.delete('post:stats', post.id)
+      // Notify listeners this post changed
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('post-updated', { detail: { postId: post.id } }))
+      }
+    } catch (e: any) {
+      console.error(e)
+      // Revert on failure
+      setLiked(!nextLiked)
+      setLikes((prev) => (nextLiked ? prev - 1 : prev + 1))
+      const msg = e?.message || 'Failed to update like'
+      toast.error(msg)
+    }
+  }
+  
+  // Load initial liked state when mounted and user present
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      if (!currentUserId) return
+      try {
+        const { likeService } = await import('@/lib/services/like-service')
+        const isLiked = await likeService.isLiked(post.id, currentUserId)
+        if (!cancelled) setLiked(isLiked)
+      } catch {
+        // ignore; keep default
+      }
+    })()
+    return () => { cancelled = true }
+  }, [post.id, currentUserId])
   
   const avatarFeatures = post.author.avatarData 
     ? decodeAvatarFeaturesV2(post.author.avatarData)
@@ -50,9 +95,16 @@ export function PostCard({ post, hideAvatar = false, isOwnPost = false }: PostCa
       // On "Your Posts" tab, show who liked instead of liking
       setShowLikesModal(true)
     } else {
-      // Normal like behavior
-      setLiked(!liked)
-      setLikes(liked ? likes - 1 : likes + 1)
+      // Require auth
+      if (!currentUserId) {
+        toast.error('Please log in to like posts')
+        return
+      }
+      // Optimistic update, then persist
+      const next = !liked
+      setLiked(next)
+      setLikes(next ? likes + 1 : Math.max(0, likes - 1))
+      void persistLike(next)
     }
   }
 

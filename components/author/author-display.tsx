@@ -5,7 +5,7 @@ import { formatTime } from '@/lib/utils'
 
 interface AuthorDisplayProps {
   author: Partial<User> & { id: string }
-  createdAt: Date
+  createdAt?: Date | number | string | null
 }
 
 export function AuthorDisplay({ author, createdAt }: AuthorDisplayProps) {
@@ -15,6 +15,17 @@ export function AuthorDisplay({ author, createdAt }: AuthorDisplayProps) {
   const displayName = author.displayName || author.username || shortId
   const username = author.username || shortId
   const verified = !!author.verified
+
+  // Be resilient to undefined/invalid dates
+  let safeDate: Date
+  if (createdAt instanceof Date) {
+    safeDate = createdAt
+  } else if (createdAt != null) {
+    const d = new Date(createdAt as any)
+    safeDate = isNaN(d.getTime()) ? new Date() : d
+  } else {
+    safeDate = new Date()
+  }
 
   return (
     <div className="flex items-center gap-1 text-sm">
@@ -28,8 +39,7 @@ export function AuthorDisplay({ author, createdAt }: AuthorDisplayProps) {
       )}
       <span className="text-gray-500 truncate">@{username}</span>
       <span className="text-gray-500">·</span>
-      <span className="text-gray-500" title={createdAt.toISOString()}>{formatTime(createdAt)}</span>
+      <span className="text-gray-500" title={safeDate.toISOString()}>{formatTime(safeDate)}</span>
     </div>
   )
 }
-

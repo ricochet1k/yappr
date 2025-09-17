@@ -1,5 +1,6 @@
-import init, { WasmSdkBuilder, WasmSdk, prefetch_trusted_quorums_testnet, prefetch_trusted_quorums_mainnet, data_contract_fetch } from '../dash-wasm/wasm_sdk';
-import { contractService } from './contract-service';
+import { WasmSdkBuilder, WasmSdk, prefetch_trusted_quorums_testnet, prefetch_trusted_quorums_mainnet, data_contract_fetch, set_logging } from '../wasm-sdk/wasm_sdk';
+
+set_logging();
 
 export interface WasmSdkConfig {
   network: 'testnet' | 'mainnet';
@@ -12,8 +13,6 @@ class WasmSdkService {
   private config: WasmSdkConfig | null = null;
   private _isInitialized = false;
   private _isInitializing = false;
-  private static wasmModuleInitialized = false;
-  private static wasmInitPromise: Promise<void> | null = null;
 
   /**
    * Initialize the WASM SDK with configuration
@@ -48,42 +47,6 @@ class WasmSdkService {
     } finally {
       this._isInitializing = false;
     }
-  }
-
-  /**
-   * Ensure WASM module is initialized (shared static method to prevent race conditions)
-   */
-  private static async _ensureWasmModuleInitialized(): Promise<void> {
-    if (WasmSdkService.wasmModuleInitialized) {
-      return;
-    }
-
-    if (WasmSdkService.wasmInitPromise) {
-      await WasmSdkService.wasmInitPromise;
-      return;
-    }
-
-    WasmSdkService.wasmInitPromise = (async () => {
-      try {
-        console.log('WasmSdkService: Initializing WASM module...');
-        // Use the same pattern as the working index.html - just call init() without parameters
-        // The init() function will automatically fetch and load the WASM file
-        await init();
-        console.log('WasmSdkService: WASM initialized successfully');
-        WasmSdkService.wasmModuleInitialized = true;
-        console.log('WasmSdkService: WASM module loaded successfully');
-      } catch (error) {
-        // Reset on error so retry is possible
-        WasmSdkService.wasmInitPromise = null;
-        throw error;
-      }
-    })();
-
-    await WasmSdkService.wasmInitPromise;
-  }
-
-  private async _ensureWasmModuleInitialized(): Promise<void> {
-    return WasmSdkService._ensureWasmModuleInitialized();
   }
 
   /**
@@ -123,9 +86,6 @@ class WasmSdkService {
 
   private async _performInitialization(): Promise<void> {
     try {
-      // Ensure WASM module is initialized first (shared across all instances)
-      await this._ensureWasmModuleInitialized();
-      
       // Now create the SDK instance for this service
       // Prefetch trusted quorums and create SDK builder based on network
       if (this.config!.network === 'testnet') {

@@ -22,10 +22,9 @@ export default function ContractPage() {
     }
   }
 
-  const documentCount = Object.keys(dataContract.documents).length
-  const totalIndices = Object.values(dataContract.documents).reduce((acc, doc: any) => 
-    acc + (doc.indices?.length || 0), 0
-  )
+  const docs: any = (dataContract as any).documents ?? (dataContract as any)
+  const documentCount = Object.keys(docs).length
+  const totalIndices: number = Object.values(docs).reduce((acc: number, doc: any) => acc + (doc?.indices?.length || 0), 0)
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
@@ -55,7 +54,7 @@ export default function ContractPage() {
             </p>
             <div className="flex gap-6 text-sm">
               <div>
-                <span className="opacity-75">Version:</span> {dataContract.version}
+                <span className="opacity-75">Version:</span> {(dataContract as any).version ?? 'n/a'}
               </div>
               <div>
                 <span className="opacity-75">Documents:</span> {documentCount}
@@ -97,7 +96,7 @@ export default function ContractPage() {
               <div className="bg-gray-50 dark:bg-gray-950 rounded-lg p-6">
                 <h3 className="font-semibold mb-4">Document Types</h3>
                 <ul className="space-y-2 text-sm">
-                  {Object.keys(dataContract.documents).map((docType) => (
+                  {Object.keys(docs).map((docType) => (
                     <li key={docType} className="flex items-center gap-2">
                       <div className="h-2 w-2 bg-yappr-500 rounded-full" />
                       <span className="font-mono">{docType}</span>

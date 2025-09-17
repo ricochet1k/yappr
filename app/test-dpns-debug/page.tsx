@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react'
 import { wasmSdkService } from '@/lib/services'
-import { get_documents } from '@/lib/dash-wasm/wasm_sdk'
+import { safeGetDocuments } from '@/lib/services/dapi-helpers'
 
 const DPNS_CONTRACT_ID = 'GWRSAVFMjXx8HpQFaNJMqBV7MBgMK4br5UESsB4S31Ec';
 
@@ -32,17 +32,15 @@ export default function TestDpnsDebugPage() {
       setError(null)
       setResult(null)
       
-      const sdk = await wasmSdkService.getSdk()
-      
       console.log(`Testing query: ${description}`)
       console.log('Where clause:', whereClause)
       
-      const response = await get_documents(
-        sdk,
+      const parsedWhere = whereClause ? JSON.parse(whereClause) : null
+      const response = await safeGetDocuments(
         DPNS_CONTRACT_ID,
         'domain',
-        whereClause || null,
-        JSON.stringify([['$createdAt', 'desc']]),
+        parsedWhere,
+        [['$createdAt', 'desc']],
         5,
         null,
         null

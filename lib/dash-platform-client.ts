@@ -1,7 +1,7 @@
 'use client'
 
 // Import the WASM SDK types we need
-import { WasmSdk } from './dash-wasm/wasm_sdk'
+import { WasmSdk } from './wasm-sdk/wasm_sdk'
 
 // Import the centralized WASM service
 import { wasmSdkService } from './services/wasm-sdk-service'

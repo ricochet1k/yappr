@@ -1,8 +1,12 @@
-import { BaseDocumentService, QueryOptions, DocumentResult } from './document-service';
+import { DocumentResult } from './document-service';
 import { Post, User } from '../types';
 import { identityService } from './identity-service';
 import { profileService } from './profile-service';
 import { cacheManager } from '../cache-manager';
+import { posts } from '../contract-docs'
+import type { PostDocument as ContractPostDoc, PostIndex } from '../contract-types.generated'
+import type { QueryOptions as TypedQueryOptions } from '../contract-api'
+import { keyManager } from '../key-manager'
 
 export interface PostDocument {
   $id: string;
@@ -11,7 +15,7 @@ export interface PostDocument {
   $updatedAt?: number;
   content: string;
   mediaUrl?: string;
-  replyToId?: string;
+  replyToPostId?: string;
   quotedPostId?: string;
   firstMentionId?: string;
   primaryHashtag?: string;
@@ -27,22 +31,29 @@ export interface PostStats {
   views: number;
 }
 
-class PostService extends BaseDocumentService<Post> {
+type PostQueryOptions = TypedQueryOptions<ContractPostDoc, PostIndex>
 
-  constructor() {
-    super('post');
-  }
+class PostService {
+  private readonly CACHE_TTL = 30000
 
   /**
    * Transform document to Post type
    */
   protected transformDocument(doc: PostDocument): Post {
+    // Be resilient to different document shapes ($-prefixed vs plain vs data wrapper)
+    const anyDoc: any = doc as any
+    const data = anyDoc.data || anyDoc
+    const id: string = anyDoc.$id || anyDoc.id || Math.random().toString(36).slice(2)
+    const ownerId: string | undefined = anyDoc.$ownerId || anyDoc.ownerId
+    const createdAtMs: number = anyDoc.$createdAt || anyDoc.createdAt || Date.now()
+    const content: string = data.content || ''
+
     // Return a basic Post object - additional data will be loaded separately
     const post: Post = {
-      id: doc.$id,
-      author: this.getDefaultUser(doc.$ownerId),
-      content: doc.content,
-      createdAt: new Date(doc.$createdAt),
+      id,
+      author: this.getDefaultUser(ownerId),
+      content,
+      createdAt: new Date(createdAtMs),
       likes: 0,
       reposts: 0,
       replies: 0,
@@ -50,10 +61,10 @@ class PostService extends BaseDocumentService<Post> {
       liked: false,
       reposted: false,
       bookmarked: false,
-      media: doc.mediaUrl ? [{
-        id: doc.$id + '-media',
+      media: data.mediaUrl ? [{
+        id: id + '-media',
         type: 'image',
-        url: doc.mediaUrl
+        url: data.mediaUrl
       }] : undefined
     };
 
@@ -63,41 +74,71 @@ class PostService extends BaseDocumentService<Post> {
     return post;
   }
 
+  private async runQuery(options: PostQueryOptions): Promise<DocumentResult<Post>> {
+    // Call typed document query
+    const res: any = await posts.query(options)
+
+    // Normalize shapes: some SDKs return array, some return {documents}
+    const rawDocs: any[] = Array.isArray(res)
+      ? res
+      : (res && typeof res === 'object' && Array.isArray(res.documents))
+        ? res.documents
+        : []
+
+    const documents = rawDocs.map((d) => this.transformDocument(d as any))
+    const nextCursor = res && typeof res === 'object' && 'nextCursor' in res ? (res as any).nextCursor : undefined
+    const prevCursor = res && typeof res === 'object' && 'prevCursor' in res ? (res as any).prevCursor : undefined
+
+    return { documents, nextCursor, prevCursor }
+  }
+
+  async get(id: string): Promise<Post | null> {
+    const doc = await posts.get(id)
+    if (!doc) return null
+    return this.transformDocument(doc as any)
+  }
+
   /**
    * Enrich post with async data
    */
   private async enrichPost(post: Post, doc: PostDocument): Promise<void> {
     try {
+      const anyDoc: any = doc as any
+      const data = anyDoc.data || anyDoc
+      const ownerId: string | undefined = anyDoc.$ownerId || anyDoc.ownerId
+      const docId: string = anyDoc.$id || anyDoc.id || post.id
       // Get author information
-      const author = await profileService.getProfile(doc.$ownerId);
+      const author = ownerId ? await profileService.getProfile(ownerId) : null;
       if (author) {
         post.author = author;
       }
       
       // Get post stats
-      const stats = await this.getPostStats(doc.$id);
+      const stats = await this.getPostStats(docId);
       post.likes = stats.likes;
       post.reposts = stats.reposts;
       post.replies = stats.replies;
       post.views = stats.views;
       
       // Get interaction status for current user
-      const interactions = await this.getUserInteractions(doc.$id);
+      const interactions = await this.getUserInteractions(docId);
       post.liked = interactions.liked;
       post.reposted = interactions.reposted;
       post.bookmarked = interactions.bookmarked;
 
       // Load reply-to post if exists
-      if (doc.replyToId) {
-        const replyTo = await this.get(doc.replyToId);
+      const replyToId: string | undefined = data.replyToId || anyDoc.replyToId
+      if (replyToId) {
+        const replyTo = await this.get(replyToId);
         if (replyTo) {
           post.replyTo = replyTo;
         }
       }
 
       // Load quoted post if exists
-      if (doc.quotedPostId) {
-        const quotedPost = await this.get(doc.quotedPostId);
+      const quotedPostId: string | undefined = data.quotedPostId || anyDoc.quotedPostId
+      if (quotedPostId) {
+        const quotedPost = await this.get(quotedPostId);
         if (quotedPost) {
           post.quotedPost = quotedPost;
         }
@@ -136,63 +177,59 @@ class PostService extends BaseDocumentService<Post> {
     if (options.language) data.language = options.language || 'en';
     if (options.sensitive !== undefined) data.sensitive = options.sensitive;
 
-    return this.create(ownerId, data);
+    // Use typed DocumentType#create (requires signer + entropy)
+    const pk = await keyManager.getPrivateKey(ownerId)
+    if (!pk) throw new Error('No private key found. Please log in again.')
+    const entropy = (() => {
+      const bytes = new Uint8Array(32)
+      if (typeof window !== 'undefined' && window.crypto) window.crypto.getRandomValues(bytes)
+      else for (let i = 0; i < 32; i++) bytes[i] = Math.floor(Math.random() * 256)
+      return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+    })()
+
+    const result = await posts.create({ ownerId, data: data as any, entropy, privateKeyWif: pk })
+    return this.transformDocument((result && (result as any).document) ? (result as any).document : (result as any))
   }
 
   /**
    * Get timeline posts
    */
-  async getTimeline(options: QueryOptions = {}): Promise<DocumentResult<Post>> {
-    const defaultOptions: QueryOptions = {
+  async getTimeline(options: PostQueryOptions = {}): Promise<DocumentResult<Post>> {
+    const defaultOptions: PostQueryOptions = {
       orderBy: [['$createdAt', 'desc']],
       limit: 20,
       ...options
     };
-
-    return this.query(defaultOptions);
+    return this.runQuery(defaultOptions)
   }
 
   /**
    * Get posts by user
    */
-  async getUserPosts(userId: string, options: QueryOptions = {}): Promise<DocumentResult<Post>> {
-    const queryOptions: QueryOptions = {
+  async getUserPosts(userId: string, options: PostQueryOptions = {}): Promise<DocumentResult<Post>> {
+    const queryOptions: PostQueryOptions = {
       where: [['$ownerId', '==', userId]],
       orderBy: [['$createdAt', 'desc']],
       limit: 20,
       ...options
     };
-
-    return this.query(queryOptions);
+    return this.runQuery(queryOptions)
   }
 
   /**
    * Get replies to a post
    */
-  async getReplies(postId: string, options: QueryOptions = {}): Promise<DocumentResult<Post>> {
-    const queryOptions: QueryOptions = {
-      where: [['replyToId', '==', postId]],
+  async getReplies(postId: string, options: PostQueryOptions = {}): Promise<DocumentResult<Post>> {
+    const queryOptions: PostQueryOptions = {
+      where: [['replyToPostId', '==', postId]],
       orderBy: [['$createdAt', 'asc']],
       limit: 20,
       ...options
     };
-
-    return this.query(queryOptions);
+    return this.runQuery(queryOptions)
   }
 
-  /**
-   * Get posts by hashtag
-   */
-  async getPostsByHashtag(hashtag: string, options: QueryOptions = {}): Promise<DocumentResult<Post>> {
-    const queryOptions: QueryOptions = {
-      where: [['primaryHashtag', '==', hashtag.replace('#', '')]],
-      orderBy: [['$createdAt', 'desc']],
-      limit: 20,
-      ...options
-    };
-
-    return this.query(queryOptions);
-  }
+  // Note: No index exists for primaryHashtag; cannot support hashtag queries without Drive index.
 
   /**
    * Get post statistics (likes, reposts, replies)
@@ -242,12 +279,13 @@ class PostService extends BaseDocumentService<Post> {
    */
   private async countReplies(postId: string): Promise<number> {
     try {
-      const result = await this.query({
-        where: [['replyToId', '==', postId]],
-        limit: 1
+      const result = await this.runQuery({
+        where: [['replyToPostId', '==', postId]],
+        // For demo purposes, fetch up to 100 replies and count them (Drive limit)
+        // Note: backend should provide a total count in production
+        limit: 100
       });
-      // In a real implementation, we'd get the total count from the query
-      return result.documents.length;
+      return result.documents.length
     } catch (error) {
       return 0;
     }
@@ -273,10 +311,10 @@ class PostService extends BaseDocumentService<Post> {
   /**
    * Get default user object when profile not found
    */
-  private getDefaultUser(userId: string): User {
+  private getDefaultUser(userId?: string): User {
     return {
-      id: userId,
-      username: userId.substring(0, 8) + '...',
+      id: userId || 'unknown',
+      username: userId ? userId.substring(0, 8) + '...' : 'unknown',
       displayName: 'Unknown User',
       avatar: '',
       bio: '',

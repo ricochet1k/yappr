@@ -1,5 +1,5 @@
 import { getWasmSdk } from './wasm-sdk-service';
-import { identity_fetch, get_identity_balance } from '../dash-wasm/wasm_sdk';
+import { identity_fetch, get_identity_balance } from '../wasm-sdk/wasm_sdk';
 import { cacheManager } from '../cache-manager';
 
 export interface IdentityInfo {

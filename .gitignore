@@ -66,14 +66,5 @@ tmp/
 target/
 Cargo.lock
 
-# WASM build artifacts and development files
-lib/wasm-sdk/
-
-# Keep only the necessary WASM files in dash-wasm
-# (the actual SDK files we need are in lib/dash-wasm/)
-.nyc_output/playwright-worker-0.json
-.nyc_output/playwright-worker-1.json
-.nyc_output/playwright-worker-2.json
-.nyc_output/playwright-worker-3.json
-.nyc_output/playwright-worker-4.json
-test-results/.last-run.json
+.nyc_output
+test-results

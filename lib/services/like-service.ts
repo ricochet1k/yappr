@@ -1,6 +1,8 @@
-import { BaseDocumentService, QueryOptions } from './document-service';
-import { stateTransitionService } from './state-transition-service';
-import { getWasmSdk } from './wasm-sdk-service';
+import type { DocumentResult } from './document-service';
+import { likes } from '../contract-docs'
+import type { LikeDocument as ContractLikeDoc, LikeIndex } from '../contract-types.generated'
+import type { QueryOptions as TypedQueryOptions } from '../contract-api'
+import { keyManager } from '../key-manager'
 
 export interface LikeDocument {
   $id: string;
@@ -9,10 +11,10 @@ export interface LikeDocument {
   postId: string;
 }
 
-class LikeService extends BaseDocumentService<LikeDocument> {
-  constructor() {
-    super('like');
-  }
+type LikeQueryOptions = TypedQueryOptions<ContractLikeDoc, LikeIndex>
+
+class LikeService {
+  private readonly CACHE_TTL = 30000
 
   /**
    * Transform document
@@ -39,15 +41,18 @@ class LikeService extends BaseDocumentService<LikeDocument> {
     const bs58 = bs58Module.default;
     const postIdBytes = Array.from(bs58.decode(postId));
 
-    // Use state transition service for creation
-    const result = await stateTransitionService.createDocument(
-      this.contractId,
-      this.documentType,
-      ownerId,
-      { postId: postIdBytes }
-    );
+    const pk = await keyManager.getPrivateKey(ownerId)
+    if (!pk) return false
+    const entropy = (() => {
+      const bytes = new Uint8Array(32)
+      if (typeof window !== 'undefined' && window.crypto) window.crypto.getRandomValues(bytes)
+      else for (let i = 0; i < 32; i++) bytes[i] = Math.floor(Math.random() * 256)
+      return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+    })()
 
-    return result.success;
+    const res = await likes.create({ ownerId, data: { postId: postIdBytes } as any, entropy, privateKeyWif: pk })
+    // If create returns the document directly or wrapped, treat as success
+    return !!res
   }
 
   /**
@@ -56,16 +61,10 @@ class LikeService extends BaseDocumentService<LikeDocument> {
   async unlikePost(postId: string, ownerId: string): Promise<boolean> {
     const like = await this.getLike(postId, ownerId);
     if (!like) return true;
-
-    // Use state transition service for deletion
-    const result = await stateTransitionService.deleteDocument(
-      this.contractId,
-      this.documentType,
-      like.$id,
-      ownerId
-    );
-
-    return result.success;
+    const pk = await keyManager.getPrivateKey(ownerId)
+    if (!pk) return false
+    const ok = await likes.delete({ documentId: like.$id, ownerId, privateKeyWif: pk })
+    return !!ok
   }
 
   /**
@@ -80,49 +79,28 @@ class LikeService extends BaseDocumentService<LikeDocument> {
    * Get like by post and owner
    */
   async getLike(postId: string, ownerId: string): Promise<LikeDocument | null> {
-    const bs58Module = await import('bs58');
-    const bs58 = bs58Module.default;
-    const postIdBytes = Array.from(bs58.decode(postId));
-
-    const result = await this.query({
-      where: [
-        ['postId', '==', postIdBytes],
-        ['$ownerId', '==', ownerId]
-      ],
-      limit: 1
-    });
-    return result.documents.length > 0 ? result.documents[0] : null;
+    const res: any = await likes.query({ where: [['postId', '==', postId], ['$ownerId', '==', ownerId]], limit: 1 })
+    const docs: any[] = Array.isArray(res) ? res : (res?.documents || [])
+    return docs.length > 0 ? this.transformDocument(docs[0]) : null;
   }
 
   /**
    * Get likes for a post
    */
-  async getPostLikes(postId: string, options: QueryOptions = {}): Promise<LikeDocument[]> {
-    const bs58Module = await import('bs58');
-    const bs58 = bs58Module.default;
-    const postIdBytes = Array.from(bs58.decode(postId));
-
-    const result = await this.query({
-      where: [['postId', '==', postIdBytes]],
-      orderBy: [['$createdAt', 'desc']],
-      limit: options.limit || 50
-    })
-    return result.documents
+  async getPostLikes(postId: string, options: LikeQueryOptions = {}): Promise<LikeDocument[]> {
+    const res: any = await likes.query({ where: [['postId', '==', postId]], orderBy: [['$createdAt', 'desc']], limit: options.limit || 50 })
+    const docs: any[] = Array.isArray(res) ? res : (res?.documents || [])
+    return docs.map((d) => this.transformDocument(d))
   }
 
   /**
    * Get user's likes
    */
-  async getUserLikes(userId: string, options: QueryOptions = {}): Promise<LikeDocument[]> {
+  async getUserLikes(userId: string, options: LikeQueryOptions = {}): Promise<LikeDocument[]> {
     try {
-      const result = await this.query({
-        where: [['$ownerId', '==', userId]],
-        orderBy: [['$createdAt', 'desc']],
-        limit: 50,
-        ...options
-      });
-
-      return result.documents;
+      const res: any = await likes.query({ where: [['$ownerId', '==', userId]], orderBy: [['$createdAt', 'desc']], limit: options.limit || 50 })
+      const docs: any[] = Array.isArray(res) ? res : (res?.documents || [])
+      return docs.map((d) => this.transformDocument(d))
     } catch (error) {
       console.error('Error getting user likes:', error);
       return [];

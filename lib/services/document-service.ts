@@ -1,12 +1,15 @@
 import { getWasmSdk } from './wasm-sdk-service';
-import { get_documents, get_document } from '../dash-wasm/wasm_sdk';
+import { safeGetDocuments, safeGetDocument } from './dapi-helpers';
 import { stateTransitionService } from './state-transition-service';
 import { YAPPR_CONTRACT_ID } from '../constants';
 import { cacheManager } from '../cache-manager';
 
+export type WhereClause = Array<[string, string, unknown]>;
+export type OrderByClause = Array<[string, 'asc' | 'desc']>;
+
 export interface QueryOptions {
-  where?: Array<[string, string, any]>;
-  orderBy?: Array<[string, 'asc' | 'desc']>;
+  where?: WhereClause;
+  orderBy?: OrderByClause;
   limit?: number;
   startAfter?: string;
   startAt?: string;
@@ -33,31 +36,24 @@ export abstract class BaseDocumentService<T> {
    */
   async query(options: QueryOptions = {}): Promise<DocumentResult<T>> {
     try {
-      const sdk = await getWasmSdk();
-      
-      // Build query
-      const query: any = {
+      // Build typed query
+      const query: {
+        contractId: string;
+        documentType: string;
+        where?: WhereClause;
+        orderBy?: OrderByClause;
+        limit?: number;
+        startAfter?: string;
+        startAt?: string;
+      } = {
         contractId: this.contractId,
-        documentType: this.documentType
+        documentType: this.documentType,
+        where: options.where,
+        orderBy: options.orderBy,
+        limit: options.limit,
+        startAfter: options.startAfter,
+        startAt: options.startAt,
       };
-
-      if (options.where) {
-        query.where = JSON.stringify(options.where);
-      }
-
-      if (options.orderBy) {
-        query.orderBy = JSON.stringify(options.orderBy);
-      }
-
-      if (options.limit) {
-        query.limit = options.limit;
-      }
-
-      if (options.startAfter) {
-        query.startAfter = options.startAfter;
-      } else if (options.startAt) {
-        query.startAt = options.startAt;
-      }
 
       console.log(`Querying ${this.documentType} documents:`, query);
       
@@ -71,12 +67,11 @@ export abstract class BaseDocumentService<T> {
 
       const cacheName = `documents:${this.documentType}`
 
-      const response = await cacheManager.getOrFetchByObject<any>(
+      const response = await cacheManager.getOrFetchByObject<unknown>(
         cacheName,
         cacheKeyObject,
         async () => {
-          return await get_documents(
-            sdk,
+          return await safeGetDocuments(
             this.contractId,
             this.documentType,
             query.where || null,
@@ -92,24 +87,14 @@ export abstract class BaseDocumentService<T> {
       )
 
       // get_documents returns an object directly, not JSON string
-      let result = response;
+      let result: unknown = response;
       
-      // Handle different response formats
-      if (response && typeof response.toJSON === 'function') {
-        result = response.toJSON();
-      }
-      
-      console.log(`${this.documentType} query result:`, result);
       console.log(`${this.documentType} result type:`, typeof result);
-      console.log(`${this.documentType} result keys:`, result ? Object.keys(result) : 'null');
       
       // Check if result is an array (direct documents response)
       if (Array.isArray(result)) {
-        console.log(`${this.documentType} result is array, transforming...`);
-        const documents = result.map((doc: any) => {
-          console.log(`Transforming ${this.documentType} document:`, doc);
-          return this.transformDocument(doc);
-        });
+        const rawDocs = result as unknown[];
+        const documents = rawDocs.map((doc) => this.transformDocument(doc));
         
         return {
           documents,
@@ -119,15 +104,24 @@ export abstract class BaseDocumentService<T> {
       }
       
       // Otherwise expect object with documents property
-      const documents = result?.documents?.map((doc: any) => {
-        console.log(`Transforming ${this.documentType} document:`, doc);
-        return this.transformDocument(doc);
-      }) || [];
+      let documents: T[] = [];
+      if (result && typeof result === 'object' && 'documents' in result) {
+        const maybeDocs = (result as { documents?: unknown }).documents;
+        if (Array.isArray(maybeDocs)) {
+          documents = (maybeDocs as unknown[]).map((doc) => this.transformDocument(doc));
+        }
+      }
       
+      let nextCursor: string | undefined
+      let prevCursor: string | undefined
+      if (result && typeof result === 'object') {
+        if ('nextCursor' in result) nextCursor = (result as { nextCursor?: string }).nextCursor
+        if ('prevCursor' in result) prevCursor = (result as { prevCursor?: string }).prevCursor
+      }
       return {
         documents,
-        nextCursor: result?.nextCursor,
-        prevCursor: result?.prevCursor
+        nextCursor,
+        prevCursor
       };
     } catch (error) {
       console.error(`Error querying ${this.documentType} documents:`, error);
@@ -145,13 +139,11 @@ export abstract class BaseDocumentService<T> {
         cacheName,
         documentId,
         async () => {
-          const sdk = await getWasmSdk();
-          const response = await get_document(
-            sdk,
+          const response = await safeGetDocument(
             this.contractId,
             this.documentType,
             documentId
-          );
+          )
           if (!response) return null as any
           const doc = response
           const transformed = this.transformDocument(doc)
@@ -168,7 +160,7 @@ export abstract class BaseDocumentService<T> {
   /**
    * Create a new document
    */
-  async create(ownerId: string, data: any): Promise<T> {
+  async create(ownerId: string, data: Record<string, unknown>): Promise<T> {
     try {
       const sdk = await getWasmSdk();
       
@@ -189,7 +181,7 @@ export abstract class BaseDocumentService<T> {
       // Invalidate caches for this document type
       cacheManager.invalidateByTag(`doctype:${this.documentType}`)
       
-      return this.transformDocument(result.document);
+      return this.transformDocument(result.document as unknown);
     } catch (error) {
       console.error(`Error creating ${this.documentType} document:`, error);
       throw error;
@@ -199,7 +191,7 @@ export abstract class BaseDocumentService<T> {
   /**
    * Update a document
    */
-  async update(documentId: string, ownerId: string, data: any): Promise<T> {
+  async update(documentId: string, ownerId: string, data: Record<string, unknown>): Promise<T> {
     try {
       const sdk = await getWasmSdk();
       
@@ -210,7 +202,7 @@ export abstract class BaseDocumentService<T> {
       if (!currentDoc) {
         throw new Error('Document not found');
       }
-      const revision = (currentDoc as any).$revision || 0;
+      const revision = (currentDoc as unknown as { $revision?: number }).$revision || 0;
       
       // Use state transition service for document update
       const result = await stateTransitionService.updateDocument(
@@ -230,7 +222,7 @@ export abstract class BaseDocumentService<T> {
       cacheManager.invalidateByTag(`doctype:${this.documentType}`)
       cacheManager.invalidateByTag(`docid:${this.documentType}:${documentId}`)
       
-      return this.transformDocument(result.document);
+      return this.transformDocument(result.document as unknown);
     } catch (error) {
       console.error(`Error updating ${this.documentType} document:`, error);
       throw error;
@@ -273,7 +265,7 @@ export abstract class BaseDocumentService<T> {
    * Transform raw document to typed object
    * Override in subclasses for custom transformation
    */
-  protected abstract transformDocument(doc: any): T;
+  protected abstract transformDocument(doc: unknown): T;
 
   /**
    * Clear cache

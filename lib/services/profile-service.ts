@@ -1,4 +1,4 @@
-import { BaseDocumentService, QueryOptions, DocumentResult } from './document-service';
+import { BaseDocumentService, QueryOptions, DocumentResult, WhereClause, OrderByClause } from './document-service';
 import { User } from '../types';
 import { dpnsService } from './dpns-service';
 import { cacheManager, createBatcher, CacheManager } from '../cache-manager';
@@ -39,34 +39,29 @@ class ProfileService extends BaseDocumentService<User> {
     try {
       const sdk = await getWasmSdk();
       
-      // Build query
-      const query: any = {
+      // Build typed query
+      const query: {
+        contractId: string;
+        documentType: string;
+        where?: WhereClause;
+        orderBy?: OrderByClause;
+        limit?: number;
+        startAfter?: string;
+        startAt?: string;
+      } = {
         contractId: this.contractId,
-        documentType: this.documentType
+        documentType: this.documentType,
+        where: options.where as WhereClause | undefined,
+        orderBy: options.orderBy as OrderByClause | undefined,
+        limit: options.limit,
+        startAfter: options.startAfter,
+        startAt: options.startAt,
       };
-
-      if (options.where) {
-        query.where = JSON.stringify(options.where);
-      }
-
-      if (options.orderBy) {
-        query.orderBy = JSON.stringify(options.orderBy);
-      }
-
-      if (options.limit) {
-        query.limit = options.limit;
-      }
-
-      if (options.startAfter) {
-        query.startAfter = options.startAfter;
-      } else if (options.startAt) {
-        query.startAt = options.startAt;
-      }
 
       console.log(`Querying ${this.documentType} documents:`, query);
       
-      const response = await get_documents(
-        sdk,
+      const { safeGetDocuments } = await import('./dapi-helpers')
+      const response = await safeGetDocuments(
         this.contractId,
         this.documentType,
         query.where || null,
@@ -88,9 +83,8 @@ class ProfileService extends BaseDocumentService<User> {
       
       // Check if result is an array (direct documents response)
       if (Array.isArray(result)) {
-        const documents = result.map((doc: any) => {
-          return this.transformDocument(doc, { cachedUsername: this.cachedUsername });
-        });
+        const rawDocs = result as unknown[]
+        const documents = rawDocs.map((doc) => this.transformDocument(doc as any, { cachedUsername: this.cachedUsername }))
         
         return {
           documents,
@@ -100,14 +94,18 @@ class ProfileService extends BaseDocumentService<User> {
       }
       
       // Otherwise expect object with documents property
-      const documents = result?.documents?.map((doc: any) => {
-        return this.transformDocument(doc, { cachedUsername: this.cachedUsername });
-      }) || [];
+      let documents: User[] = []
+      if (result && typeof result === 'object' && 'documents' in result) {
+        const maybe = (result as { documents?: unknown[] }).documents
+        if (Array.isArray(maybe)) {
+          documents = maybe.map((doc) => this.transformDocument(doc as any, { cachedUsername: this.cachedUsername }))
+        }
+      }
       
       return {
         documents,
-        nextCursor: result?.nextCursor,
-        prevCursor: result?.prevCursor
+        nextCursor: (result as any)?.nextCursor,
+        prevCursor: (result as any)?.prevCursor
       };
     } catch (error) {
       console.error(`Error querying ${this.documentType} documents:`, error);
@@ -307,8 +305,8 @@ class ProfileService extends BaseDocumentService<User> {
     try {
       const sdk = await getWasmSdk();
       
-      const response = await get_document(
-        sdk,
+      const { safeGetDocument } = await import('./dapi-helpers')
+      const response = await safeGetDocument(
         this.contractId,
         'avatar',
         avatarId
@@ -481,7 +479,8 @@ export const profileService = new ProfileService();
 
 // Import at the bottom to avoid circular dependency
 import { getWasmSdk } from './wasm-sdk-service';
-import { get_document, get_documents } from '../dash-wasm/wasm_sdk';
+import { get_document } from '../wasm-sdk/wasm_sdk';
+import { safeGetDocuments } from './dapi-helpers';
 import { stateTransitionService } from './state-transition-service';
 
 // Module-level typed batcher for profile documents by owner ID
@@ -493,14 +492,11 @@ const enqueueProfileDoc = createBatcher<string, ProfileDocument | null>({
   handler: async (entries) => {
     const sdk = await getWasmSdk()
     const ownerIds = entries.map(e => e.original)
-    const where = [['$ownerId', 'in', ownerIds]]
-    const orderBy = [['$ownerId', 'asc']]
-    const resp = await get_documents(
-      sdk,
+    const resp = await safeGetDocuments(
       profileService['contractId'],
       'profile',
-      JSON.stringify(where),
-      JSON.stringify(orderBy),
+      [['$ownerId', 'in', ownerIds]],
+      [['$ownerId', 'asc']],
       100,
       null,
       null
@@ -508,7 +504,7 @@ const enqueueProfileDoc = createBatcher<string, ProfileDocument | null>({
     const docs = Array.isArray(resp) ? resp : (resp?.documents || [])
     const byOwner = new Map<string, ProfileDocument>()
     for (const d of docs) {
-      const owner = (d as any).$ownerId || (d as any).ownerId
+      const owner = d.$ownerId || d.ownerId
       if (owner) byOwner.set(owner, d)
     }
     for (const entry of entries) {
